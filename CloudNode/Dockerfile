@@ -31,22 +31,17 @@ ENV PYTHONPATH="/app/scripts"
 # Suppress TensorFlow warnings by setting TF_CPP_MIN_LOG_LEVEL to 3
 ENV TF_CPP_MIN_LOG_LEVEL=3
 
-
-# Add the following line to ensure it's persisted in interactive shells
+# Ensure it's persisted in interactive shells
 RUN echo "export PYTHONPATH=/app/scripts" >> /etc/profile.d/pythonpath.sh
 
-
-# Set the working directory
 WORKDIR /app
 
 RUN mkdir -p /app/images \
     && mkdir -p /app/cache_json \
     && mkdir -p /app/scripts \
     && mkdir -p /app/scripts/model_usage \
-    && mkdir -p /app/scripts/statistics_usage \
-    && mkdir -p /app/scripts/kan_usage
+    && mkdir -p /app/scripts/statistics_usage
 
-# Copy the JAR file and Python scripts into the container
 COPY CloudNode-0.0.1-SNAPSHOT.jar /app/
 COPY model_usage/create_init_lstm_model.py /app/scripts/model_usage/
 COPY model_usage/__init__.py /app/scripts/model_usage/
@@ -58,21 +53,10 @@ COPY statistics_usage/traffic_statistics.py /app/scripts/statistics_usage/
 COPY statistics_usage/__init__.py /app/scripts/statistics_usage/
 COPY model_usage/aggregate_favg_models.py /app/scripts/model_usage/
 COPY model_usage/model_utils.py /app/scripts/model_usage/
-COPY kan_usage/kan_utils.py /app/scripts/kan_usage/
-COPY kan_usage/spline.py /app/scripts/kan_usage/
-COPY kan_usage/grid.py /app/scripts/kan_usage/
-COPY kan_usage/symbolic_functions.py /app/scripts/kan_usage/
-COPY kan_usage/symbolic_kan_layer.py /app/scripts/kan_usage/
-COPY kan_usage/kan_layer.py /app/scripts/kan_usage/
-COPY kan_usage/dense_kan_layer.py /app/scripts/kan_usage/
-COPY kan_usage/__init__.py /app/scripts/kan_usage/
 
-RUN chmod +x /app/scripts/kan_usage/*.py \
-    /app/scripts/model_usage/*.py \
+RUN chmod +x /app/scripts/model_usage/*.py \
     /app/scripts/statistics_usage/*.py
 
-# Expose the port the app runs on
 EXPOSE 8080
 
-# Set the command to run the Java application
 ENTRYPOINT ["java", "-jar", "CloudNode-0.0.1-SNAPSHOT.jar"]
