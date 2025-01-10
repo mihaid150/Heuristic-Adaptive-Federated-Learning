@@ -5,10 +5,16 @@ import matplotlib.pyplot as plt
 
 
 def plot_time_for_all_edges_readiness(fog_data_readiness):
+    """
+    Plot the time taken for all edges to be ready for each fog node.
+
+    Args:
+        fog_data_readiness (dict): A dictionary where keys are fog names and values are lists of readiness times.
+    """
     plt.figure(figsize=(12, 6))
 
-    for for_name, readiness_times in fog_data_readiness.items():
-        plt.plot(readiness_times, label=for_name, marker='o')
+    for fog_name, readiness_times in fog_data_readiness.items():
+        plt.plot(readiness_times, label=fog_name, marker='o')
 
     plt.title('Time for All Edges Readiness for Each Fog')
     plt.xlabel('Index')
@@ -22,6 +28,12 @@ def plot_time_for_all_edges_readiness(fog_data_readiness):
 
 
 def plot_time_for_all_edges_genetic(fog_data_genetic_time):
+    """
+    Plot the genetic evaluation time for each fog node.
+
+    Args:
+        fog_data_genetic_time (dict): A dictionary where keys are fog names and values are lists of genetic evaluation times.
+    """
     plt.figure(figsize=(12, 6))
 
     for fog_name, genetic_times in fog_data_genetic_time.items():
@@ -36,10 +48,15 @@ def plot_time_for_all_edges_genetic(fog_data_genetic_time):
 
     plt.savefig('/app/images/elapsed_time_chart_fog_genetic_time.png', format='png')
     plt.close()
-    pass
 
 
 def plot_time_received_edge_model(fog_data_received_edge_model):
+    """
+    Plot the time taken to receive edge models for each fog node.
+
+    Args:
+        fog_data_received_edge_model (dict): A dictionary where keys are fog names and values are lists of lists of received times.
+    """
     plt.figure(figsize=(12, 6))
 
     for fog_name, received_model_times in fog_data_received_edge_model.items():
@@ -59,6 +76,12 @@ def plot_time_received_edge_model(fog_data_received_edge_model):
 
 
 def plot_time_finish_aggregation_for_each_edge(fog_data_finish_aggregation):
+    """
+    Plot the time taken to finish aggregation for edge models for each fog node.
+
+    Args:
+        fog_data_finish_aggregation (dict): A dictionary where keys are fog names and values are lists of lists of finish aggregation times.
+    """
     plt.figure(figsize=(12, 6))
 
     for fog_name, finish_aggregation_times in fog_data_finish_aggregation.items():
@@ -77,6 +100,14 @@ def plot_time_finish_aggregation_for_each_edge(fog_data_finish_aggregation):
 
 
 def process_elapsed_time_data_fog(elapsed_time_map):
+    """
+    Process the elapsed time data for fog nodes and generate plots for readiness, genetic evaluation,
+    received edge model times, and finish aggregation times.
+
+    Args:
+        elapsed_time_map (dict): A dictionary where keys are fog names and values are lists of dictionaries
+                                 containing various elapsed time metrics.
+    """
     fog_data_readiness = {}
     fog_data_genetic_time = {}
     fog_data_received_edge_model = {}
@@ -87,6 +118,7 @@ def process_elapsed_time_data_fog(elapsed_time_map):
         genetic_evaluation_times = []
         received_edge_model_times = []
         finish_aggregation_times = []
+
         for elapsed_time in elapsed_times:
             readiness_time = elapsed_time['timeForAllEdgesReadiness']
             genetic_time = elapsed_time['timeGeneticEvaluation']
@@ -110,6 +142,15 @@ def process_elapsed_time_data_fog(elapsed_time_map):
 
 
 if __name__ == "__main__":
+    """
+    Main script to process elapsed time data for fog nodes.
+
+    Args:
+        sys.argv[1] (str): JSON string containing the elapsed time map.
+
+    Returns:
+        None
+    """
     json_data = sys.argv[1]
     elapsed_time_map_arg = json.loads(json_data)
     process_elapsed_time_data_fog(elapsed_time_map_arg)
