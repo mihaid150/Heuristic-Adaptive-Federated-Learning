@@ -19,13 +19,13 @@ import org.springframework.util.MultiValueMap;
 import org.springframework.web.client.RestTemplate;
 
 import java.io.File;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.Stack;
+import java.util.*;
 import java.util.concurrent.CompletableFuture;
 
-
+/**
+ * A utility class providing various services for cloud nodes, such as notifying fog nodes,
+ * managing edge-to-fog associations, broadcasting models, and clearing cache files.
+ */
 @Component
 @RequiredArgsConstructor
 public class CloudServiceUtils {
@@ -34,12 +34,22 @@ public class CloudServiceUtils {
     @Getter
     private final HttpHeaders jsonHeaders = createJsonHeaders();
 
+    /**
+     * Creates HTTP headers for json file transmission.
+     *
+     * @return HttpHeaders configured for json file data communication.
+     */
     private HttpHeaders createJsonHeaders() {
         HttpHeaders headers = new org.springframework.http.HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_FORM_URLENCODED);
         return headers;
     }
 
+    /**
+     * Notifies all fog nodes about the cloud host for communication purposes.
+     *
+     * @param restTemplate The {@link RestTemplate} used to send HTTP requests.
+     */
     public void notifyFogAboutCloud(RestTemplate restTemplate) {
 
         // notifies all the fog children nodes about the cloud IP/HOST for communication purpose
@@ -62,13 +72,18 @@ public class CloudServiceUtils {
         }
     }
 
+    /**
+     * Associates edges to fog nodes and informs each fog node about its associated edges.
+     *
+     * @param restTemplate The {@link RestTemplate} used to send HTTP requests.
+     */
     public void associateEdgesToFogProcess(RestTemplate restTemplate) {
         // informs each fog what edges are associated with it
 
-        // converts the map with edges to a stack to better usage
-        Stack<EdgeTuple> edgesStack = new Stack<>();
+        // converts the map with edges to a queue to better usage
+        Queue<EdgeTuple> edgesQueue = new LinkedList<>();
         for (Map.Entry<String, List<String>> entry : deviceManager.getEdgesMap().entrySet()) {
-            edgesStack.push(new EdgeTuple(entry.getValue().get(0), entry.getKey(), entry.getValue().get(1)));
+            edgesQueue.add(new EdgeTuple(entry.getValue().get(0), entry.getKey(), entry.getValue().get(1)));
         }
 
         // for each fog create a mini stack with its edges and send to each the notification
@@ -76,7 +91,7 @@ public class CloudServiceUtils {
             Stack<EdgeTuple> edgeTupleStack = new Stack<>();
             List<EdgeTuple> edgeTupleList = new ArrayList<>();
             for (int i = 0; i < 3; i++) {
-                EdgeTuple edgeTuple = edgesStack.pop();
+                EdgeTuple edgeTuple = edgesQueue.remove();
                 edgeTupleStack.push(edgeTuple);
                 edgeTupleList.add(edgeTuple);
             }
@@ -85,6 +100,13 @@ public class CloudServiceUtils {
         }
     }
 
+    /**
+     * Sends notifications to edges from a specific fog node.
+     *
+     * @param edgeTupleStack The stack of {@link EdgeTuple} objects representing the edges associated with the fog node.
+     * @param fogHost        The host address of the fog node.
+     * @param restTemplate   The {@link RestTemplate} used to send HTTP requests.
+     */
     private void notifyEdgesFromFog(Stack<EdgeTuple> edgeTupleStack, String fogHost, RestTemplate restTemplate) {
         while (!edgeTupleStack.isEmpty()) {
             EdgeTuple tuple = edgeTupleStack.pop();
@@ -97,6 +119,14 @@ public class CloudServiceUtils {
         }
     }
 
+    /**
+     * Sends an HTTP POST request to a specified URL with the given body and headers.
+     *
+     * @param url           The URL to send the POST request to.
+     * @param body          A {@link MultiValueMap} containing the body of the request.
+     * @param headers       The {@link HttpHeaders} to include in the request.
+     * @param restTemplate  The {@link RestTemplate} used to send the HTTP request.
+     */
     private void sendPostRequest(String url, MultiValueMap<String, ?> body, HttpHeaders headers,
                                  RestTemplate restTemplate) {
         HttpEntity<MultiValueMap<String, ?>> requestEntity = new HttpEntity<>(body, headers);
@@ -109,6 +139,19 @@ public class CloudServiceUtils {
         }
     }
 
+    /**
+     * Broadcasts a model file to all fog nodes with specific training configurations.
+     *
+     * @param resource                 The {@link FileSystemResource} representing the model file to broadcast.
+     * @param dates                    A list of dates representing the training timeline.
+     * @param restTemplate             The {@link RestTemplate} used to send HTTP requests.
+     * @param formHeaders              The {@link HttpHeaders} for the HTTP request.
+     * @param concurrencyManager       The {@link ConcurrencyManager} for managing asynchronous tasks.
+     * @param isCacheActive            A boolean indicating if caching is active.
+     * @param isInitialTraining        A boolean indicating if this is the initial training process.
+     * @param aggregationType          The type of aggregation to perform.
+     * @param geneticEvaluationStrategy The strategy for genetic evaluation, if applicable.
+     */
     public void broadcast(FileSystemResource resource, List<String> dates, RestTemplate restTemplate, HttpHeaders
             formHeaders, ConcurrencyManager concurrencyManager, Boolean isCacheActive, Boolean isInitialTraining,
                           AggregationType aggregationType, GeneticEvaluationStrategy geneticEvaluationStrategy) {
@@ -131,6 +174,16 @@ public class CloudServiceUtils {
         CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
     }
 
+    /**
+     * Sends a broadcast request to a specific fog node.
+     *
+     * @param body           The {@link MultiValueMap} containing the broadcast request body.
+     * @param headers        The {@link HttpHeaders} for the HTTP request.
+     * @param element        A map entry representing the fog node's IP address and name.
+     * @param restTemplate   The {@link RestTemplate} used to send HTTP requests.
+     * @param date           The date associated with the broadcast.
+     * @param aggregationType The type of aggregation to perform.
+     */
     private void broadcastHelper(MultiValueMap<String, Object> body, HttpHeaders headers,
                                  Map.Entry<String, String> element, RestTemplate restTemplate, String date,
                                  AggregationType aggregationType) {
@@ -147,6 +200,53 @@ public class CloudServiceUtils {
         }
     }
 
+    /**
+     * Broadcasts a model file to all edge nodes for evaluation.
+     *
+     * @param resource The {@link FileSystemResource} representing the model file to broadcast.
+     * @param date     The date associated with the broadcast.
+     */
+    public void broadcastEvaluation(FileSystemResource resource, String date) {
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.MULTIPART_FORM_DATA);
+        RestTemplate restTemplate = new RestTemplate();
+
+
+
+        Map<String, List<String>> edgesMap = deviceManager.getEdgesMap();
+        if (edgesMap != null) {
+            edgesMap.forEach((edgeHost, edgeInfo) -> {
+                        String url = "http://192.168.2." + edgeHost + ":8080/edge/evaluate-model";
+
+                        MultiValueMap<String, Object> body = new LinkedMultiValueMap<>();
+                        body.add("file", resource);
+                        body.add("date", date);
+                        body.add("lclid", edgeInfo.get(1));
+                        HttpEntity<MultiValueMap<String, Object>> requestEntity = new HttpEntity<>(body, headers);
+
+                        ResponseEntity<String> response = restTemplate.postForEntity(url, requestEntity, String.class);
+                        if (response.getStatusCode().is2xxSuccessful()) {
+                            System.out.println(date + ": Successfully evaluation done one : " + edgeInfo.get(0));
+                        } else {
+                            System.err.println("Failed to evaluate on : " + edgeInfo.get(0) + ". Status code: " +
+                                    response.getStatusCode());
+                        }
+                    }
+            );
+        }
+    }
+
+    /**
+     * Creates a multi-part body for broadcasting a model to fog nodes.
+     *
+     * @param resource                 The {@link FileSystemResource} representing the model file to broadcast.
+     * @param dates                    A list of dates associated with the training timeline.
+     * @param isInitialTraining        A boolean indicating if this is the initial training process.
+     * @param isCacheActive            A boolean indicating if caching is active.
+     * @param aggregationType          The type of aggregation to perform.
+     * @param geneticEvaluationStrategy The strategy for genetic evaluation, if applicable.
+     * @return A {@link MultiValueMap} containing the body data for the broadcast request.
+     */
     private MultiValueMap<String, Object> createBroadcastBody(FileSystemResource resource, List<String> dates,
                                                               boolean isInitialTraining, boolean isCacheActive,
                                                               AggregationType aggregationType,
@@ -162,6 +262,9 @@ public class CloudServiceUtils {
         return body;
     }
 
+    /**
+     * Deletes all JSON files acting as cache in the specified folder.
+     */
     public void deleteCacheJsonFolderContent() {
 
         // it removes from the storage all the json files acting as cache
@@ -187,6 +290,9 @@ public class CloudServiceUtils {
         }
     }
 
+    /**
+     * Deletes all fog model files stored in the cloud directory.
+     */
     public void deleteFogModelFiles() {
         File directory = new File(pathManager.getCloudDirectoryPath());
         if (!directory.exists() || !directory.isDirectory()) {
@@ -209,6 +315,9 @@ public class CloudServiceUtils {
         }
     }
 
+    /**
+     * Deletes the results file from the cloud directory.
+     */
     public void deleteResultFile() {
 
         // removes all files that store previous results

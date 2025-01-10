@@ -20,7 +20,10 @@ import java.io.InputStreamReader;
 import java.util.*;
 import java.util.stream.Collectors;
 
-
+/**
+ * A utility component responsible for generating statistical charts and handling
+ * data related to elapsed time, traffic, and performance in the federated system.
+ */
 @Component
 @RequiredArgsConstructor
 public class StatisticsGenerator {
@@ -29,6 +32,13 @@ public class StatisticsGenerator {
     private final DeviceManager deviceManager;
     private final CloudTraffic cloudTraffic;
 
+    /**
+     * Creates an elapsed time chart based on recorded data.
+     *
+     * @return A {@link ResponseEntity} indicating the success or failure of the operation.
+     * @throws IOException If there is an error reading or writing files.
+     * @throws InterruptedException If the process execution is interrupted.
+     */
     public ResponseEntity<?> createElapsedTimeChart() throws IOException, InterruptedException {
         // load the json containing recorded elapsed time
         concurrencyManager.loadCacheFromJsonFile();
@@ -39,7 +49,7 @@ public class StatisticsGenerator {
         Map<String, Double> filteredElapsedTimeIterations = concurrencyManager.getElapsedTimeOverIterations()
                 .entrySet()
                 .stream()
-                .filter(entry -> !entry.getKey().contains("2013-07-09"))
+                .filter(entry -> !entry.getKey().contains("2018-04-20"))
                 .sorted(Map.Entry.comparingByKey((key1, key2) -> {
                     // strip unwanted characters before comparing the dates
                     String cleanedKey1 = key1.replaceAll("[\"\\[\\]]", "").trim();
@@ -74,6 +84,12 @@ public class StatisticsGenerator {
         return ResponseEntity.ok("Created successfully the chart!");
     }
 
+    /**
+     * Creates elapsed time charts for the fog layer by retrieving and processing data from fog nodes.
+     *
+     * @param restTemplate The {@link RestTemplate} used to send requests to fog nodes.
+     * @return A {@link ResponseEntity} indicating the success or failure of the operation.
+     */
     public ResponseEntity<?> createElapsedTimeChartsFogLayer(RestTemplate restTemplate) {
         // collect the elapsed time from the fogs by requests
         Map<String, ElapsedTimeFog[]> elapsedTimeFogMap = new HashMap<>();
@@ -88,7 +104,7 @@ public class StatisticsGenerator {
 
         // format, filter the elapsed time lists
         Map<String, ElapsedTimeFog[]> filteredElapsedTimeFogMap = elapsedTimeFogMap.entrySet().stream()
-                .filter(entry -> !entry.getKey().contains("2013-07-09"))
+                .filter(entry -> !entry.getKey().contains("2018-04-20"))
                 .collect(Collectors.toMap(
                         Map.Entry::getKey,
                         Map.Entry::getValue,
@@ -120,6 +136,12 @@ public class StatisticsGenerator {
         return ResponseEntity.ok("Elapsed time charts for fog layer created successfully!");
     }
 
+    /**
+     * Creates a traffic chart based on data collected from the cloud, fog, and edge nodes.
+     *
+     * @param restTemplate The {@link RestTemplate} used to retrieve traffic data from nodes.
+     * @return A {@link ResponseEntity} indicating the success or failure of the operation.
+     */
     public ResponseEntity<?> createTrafficChart(RestTemplate restTemplate) {
         // load the traffic from the json where it was stored
         cloudTraffic.loadTrafficFromJsonFile();
@@ -236,6 +258,12 @@ public class StatisticsGenerator {
         return ResponseEntity.ok("Successfully created traffic chart!");
     }
 
+    /**
+     * Creates a performance chart based on performance data from edge nodes.
+     *
+     * @param restTemplate The {@link RestTemplate} used to retrieve performance data from edge nodes.
+     * @return A {@link ResponseEntity} indicating the success or failure of the operation.
+     */
     public ResponseEntity<?> createPerformanceChart(RestTemplate restTemplate) {
         Map<String, List<EdgePerformanceResult>> edgePerformanceMap = new HashMap<>();
 
@@ -289,6 +317,14 @@ public class StatisticsGenerator {
         return ResponseEntity.ok("Successfully created performance chart!");
     }
 
+    /**
+     * Executes a process with the given command and handles its output.
+     *
+     * @param command The list of command-line arguments to run the process.
+     * @return The exit code of the process.
+     * @throws IOException If an error occurs while starting or reading from the process.
+     * @throws InterruptedException If the process execution is interrupted.
+     */
     private int processExecutor(List<String> command) throws IOException, InterruptedException {
         ProcessBuilder processBuilder = new ProcessBuilder(command);
         Process process = processBuilder.start();

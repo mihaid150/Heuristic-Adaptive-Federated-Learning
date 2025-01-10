@@ -19,6 +19,11 @@ import java.io.File;
 import java.io.IOException;
 import java.util.List;
 
+/**
+ * Service class for managing the Federated Averaging (FAVG) operations in the cloud node.
+ * Handles initialization of global processes, broadcasting models to fog nodes,
+ * and daily federated training operations.
+ */
 @Service
 @RequiredArgsConstructor
 public class CloudFAVGService {
@@ -31,6 +36,11 @@ public class CloudFAVGService {
     private final RestTemplate restTemplate = new RestTemplate();
     private final StopWatch stopWatch;
 
+    /**
+     * Creates HTTP headers for file transmission using multipart form data.
+     *
+     * @return HttpHeaders configured for multipart form data communication.
+     */
     private HttpHeaders createFormHeaders() {
         // create a global communication header for  file transmission
         // TODO check if can we a unique utility method
@@ -39,6 +49,14 @@ public class CloudFAVGService {
         return headers;
     }
 
+    /**
+     * Initializes the global process for the cloud node, including setting up initial
+     * configurations, clearing previous data, and broadcasting a dummy model to fog nodes.
+     *
+     * @return ResponseEntity indicating the status of the operation.
+     * @throws IOException          If an I/O error occurs during initialization.
+     * @throws InterruptedException If the process is interrupted.
+     */
     public ResponseEntity<?> initializeGlobalProcess() throws IOException, InterruptedException {
 
         // reset and start the stopWatch for global elapsed time
@@ -78,12 +96,18 @@ public class CloudFAVGService {
         return ResponseEntity.ok("Initialization and transmission of cloud model successfully.");
     }
 
+    /**
+     * Broadcasts the initial dummy model to fog nodes for the first round of training.
+     * Sets the initial aggregation date and training configuration for fog nodes.
+     *
+     * @param dummyModel The dummy model file to be broadcasted.
+     */
     private void initialBroadcastToFogs(File dummyModel) {
         // start and end date for initial training chosen based on dataset
-        List<String> dates = List.of("2012-07-09", "2013-07-09");
+        List<String> dates = List.of("2017-04-20", "2018-04-20");
 
         // initial aggregation date
-        concurrencyManager.addNewAggregatedDate("2013-07-09");
+        concurrencyManager.addNewAggregatedDate("2018-04-20");
 
         // set to FALSE the flag for AlreadyAggregated
         concurrencyManager.setAlreadyAggregated(Boolean.FALSE);
@@ -94,6 +118,13 @@ public class CloudFAVGService {
                 true, AggregationType.AVERAGE, null);
     }
 
+    /**
+     * Handles daily federated training by broadcasting the global model to fog nodes
+     * for further processing and aggregation. Updates the aggregated dates and resets
+     * the state for a new training round.
+     *
+     * @param date The date for the current round of federation.
+     */
     public void dailyFederation(String date) {
         // reset the stopwatch for round elapsed time measuring
         stopWatch.reset();

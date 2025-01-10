@@ -21,20 +21,71 @@ import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Stream;
 
+/**
+ * Monitors and processes received fog model files for aggregation at the cloud node.
+ * <p>
+ * This class implements a listener mechanism to detect when all fog models have been received and triggers
+ * the appropriate aggregation process (e.g., FedAvg or heuristic-based aggregation). It handles file reading,
+ * aggregation, and cleanup after the aggregation process.
+ * </p>
+ */
 @Component
 @RequiredArgsConstructor
 public class MonitorReceivedFogModels implements Runnable {
+
+    /**
+     * Manages concurrency utilities such as locks, schedules, and counters.
+     */
     private final ConcurrencyManager concurrencyManager;
+
+    /**
+     * Provides paths to various files and directories used in the cloud node.
+     */
     private final PathManager pathManager;
+
+    /**
+     * Manages devices (fogs and edges) associated with the cloud node.
+     */
     private final DeviceManager deviceManager;
+
+    /**
+     * Stopwatch used to measure elapsed time during aggregation and monitoring processes.
+     */
     private final StopWatch stopWatch;
-    private final CoolingSchedule coolingSchedule;
+
+    /**
+     * Manages cooling schedules for the cloud node.
+     */
+    private final CloudCoolingSchedule cloudCoolingSchedule;
+
+    /**
+     * Tracks traffic statistics for incoming and outgoing requests.
+     */
     private final CloudTraffic cloudTraffic;
+
+    /**
+     * Utility class providing common cloud-related functionalities.
+     */
     private final CloudServiceUtils cloudServiceUtils;
+
+    /**
+     * WebSocket handler for notifying clients about aggregation completion.
+     */
     private final AggregationWebSocketHandler aggregationWebSocketHandler;
+
+    /**
+     * Specifies the type of model being processed.
+     */
     @Setter
     private String modelType;
 
+    /**
+     * Monitors the directory for received fog model files.
+     * <p>
+     * When all expected fog model files are received, it initiates the aggregation process and performs
+     * necessary post-aggregation tasks such as clearing files and storing results.
+     * </p>
+     */
     @Override
     public void run() {
         // listener method to wait for fog aggregated models
@@ -74,7 +125,7 @@ public class MonitorReceivedFogModels implements Runnable {
                 concurrencyManager.getReceivingLock().lock();
 
                 // no need to cool down the temperature this round
-                coolingSchedule.stopCooling();
+                cloudCoolingSchedule.stopCloudCoolingScheduleThread();
 
                 // printing purpose
                 concurrencyManager.getWaiterCounter().set(0);
@@ -156,6 +207,12 @@ public class MonitorReceivedFogModels implements Runnable {
         }
     }
 
+    /**
+     * Checks whether all results in the provided map correspond to the same date.
+     *
+     * @param resultMap A map containing fog results with their associated dates.
+     * @return {@code true} if all results have the same date, otherwise {@code false}.
+     */
     private Boolean allCurrentDatesMatch(Map<String, Map<String, String>> resultMap) {
         // check if all the results are from the same day
         List<String> dates = new ArrayList<>();
@@ -163,6 +220,12 @@ public class MonitorReceivedFogModels implements Runnable {
         return dates.stream().allMatch(date -> date.equals(dates.get(0)));
     }
 
+    /**
+     * Retrieves the last aggregation date from the provided results map.
+     *
+     * @param resultsMap A map containing fog results with their associated dates.
+     * @return The last aggregation date as a string.
+     */
     private String getAggregatedDate(Map<String, Map<String, String>> resultsMap) {
         // get the last aggregation date
         List<String> dates = new ArrayList<>();
@@ -170,6 +233,14 @@ public class MonitorReceivedFogModels implements Runnable {
         return dates.get(0).replace("]", "");
     }
 
+    /**
+     * Creates a dummy model file based on the specified model type.
+     *
+     * @param modelType The type of model to create (e.g., "LSTM").
+     * @return The created dummy model file.
+     * @throws IOException If an error occurs during file creation.
+     * @throws InterruptedException If the process is interrupted during execution.
+     */
     public File createDummyModel(String modelType) throws IOException, InterruptedException {
 
         // creation a dummy(random) initial architecture model
@@ -212,6 +283,13 @@ public class MonitorReceivedFogModels implements Runnable {
         return modelFile;
     }
 
+    /**
+     * Aggregates fog models based on heuristic strategies using specified lambda values.
+     *
+     * @param globalModelFile The global model file.
+     * @param fogModelFiles A map of fog model files.
+     * @param lambda_prevs A map of lambda values associated with each fog model.
+     */
     private void aggregateModels(File globalModelFile, Map<String, File> fogModelFiles, Map<String, Double> lambda_prevs) {
         // aggregation method for the fog models in the heuristic branch
         // loading the executable file for aggregation and set up the arguments
@@ -249,6 +327,13 @@ public class MonitorReceivedFogModels implements Runnable {
         }
     }
 
+    /**
+     * Loads a Python script from the specified path.
+     *
+     * @param scriptPath The path to the Python script.
+     * @return The {@link File} object representing the Python script.
+     * @throws IOException If the script file does not exist or cannot be accessed.
+     */
     private File loadPythonScript(String scriptPath) throws IOException {
         File scriptFile = new File(scriptPath);
 
@@ -260,7 +345,11 @@ public class MonitorReceivedFogModels implements Runnable {
         return scriptFile;
     }
 
-
+    /**
+     * Retrieves the global model file, creating a new one if it does not exist.
+     *
+     * @return The global model file.
+     */
     private File getGlobalModelFile() {
         // load the global file if exists and if not creates a new one
         Path path = Paths.get(pathManager.getGlobalModelPath());
@@ -280,6 +369,12 @@ public class MonitorReceivedFogModels implements Runnable {
         return globalModelFile;
     }
 
+    /**
+     * Retrieves fog model files from the specified directory.
+     *
+     * @param directory The directory containing fog model files.
+     * @return A map of fog model names to their corresponding files.
+     */
     private Map<String, File> getFogModels(File directory) {
         // gets the locally saved fog model files in a map
         Map<String, File> fogModelFiles = new HashMap<>();
@@ -296,6 +391,14 @@ public class MonitorReceivedFogModels implements Runnable {
         return fogModelFiles;
     }
 
+    /**
+     * Aggregates fog models using the FedAvg strategy.
+     *
+     * @param globalModelFile The global model file.
+     * @param fogModels A map of fog model files.
+     * @throws IOException If an error occurs during file handling.
+     * @throws InterruptedException If the process is interrupted during execution.
+     */
     private void aggregateModelsFavg(File globalModelFile, Map<String, File> fogModels) throws IOException, InterruptedException {
         // aggregation method for the fog models in the favg branch
         // loading the executable file for aggregation and set up the arguments
@@ -322,6 +425,14 @@ public class MonitorReceivedFogModels implements Runnable {
         }
     }
 
+
+    /**
+     * Executes a process with the specified command.
+     *
+     * @param command A list of command-line arguments to run the process.
+     * @return The {@link Process} instance representing the running process.
+     * @throws IOException If an error occurs while starting the process.
+     */
     private Process runProcess(List<String> command) throws IOException {
         // util for running a process
         ProcessBuilder processBuilder = new ProcessBuilder(command);
@@ -329,6 +440,13 @@ public class MonitorReceivedFogModels implements Runnable {
         return processBuilder.start();
     }
 
+    /**
+     * Parses the output of a running process and filters out unwanted logs.
+     *
+     * @param process The process whose output is to be captured.
+     * @return A {@link StringBuilder} containing the filtered output of the process.
+     * @throws IOException If an error occurs while reading the process output.
+     */
     private StringBuilder provideProcessOutput(Process process) throws IOException {
         // parse the output from a ran process and delete some unwanted logs
         BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()));
@@ -343,6 +461,10 @@ public class MonitorReceivedFogModels implements Runnable {
         return output;
     }
 
+    /**
+     * Performs post-aggregation tasks such as clearing fog model files, storing traffic statistics, and
+     * notifying clients about aggregation completion.
+     */
     private void postAggregationUtils() {
         // some util instructions after the aggregation has executed
 

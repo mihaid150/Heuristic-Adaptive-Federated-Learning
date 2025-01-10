@@ -6,7 +6,7 @@ import com.federated_dsrl.cloudnode.config.GeneticEvaluationStrategy;
 import com.federated_dsrl.cloudnode.config.PathManager;
 import com.federated_dsrl.cloudnode.entity.CloudTraffic;
 import com.federated_dsrl.cloudnode.tools.ConcurrencyManager;
-import com.federated_dsrl.cloudnode.tools.CoolingSchedule;
+import com.federated_dsrl.cloudnode.tools.CloudCoolingSchedule;
 import com.federated_dsrl.cloudnode.tools.MonitorReceivedFogModels;
 import com.federated_dsrl.cloudnode.tools.StatisticsGenerator;
 import com.federated_dsrl.cloudnode.utils.CloudServiceUtils;
@@ -31,13 +31,17 @@ import java.io.*;
 import java.util.*;
 import java.util.concurrent.*;
 
+/**
+ * Service class responsible for managing the cloud node's operations, including
+ * initializing global models, processing received fog models, and generating various statistics.
+ */
 @Service
 @RequiredArgsConstructor
 public class CloudService {
     private final CloudServiceUtils cloudServiceUtils;
     private final PathManager pathManager;
     private final DeviceManager deviceManager;
-    private final CoolingSchedule coolingSchedule;
+    private final CloudCoolingSchedule cloudCoolingSchedule;
     private final ConcurrencyManager concurrencyManager;
     private final CloudTraffic cloudTraffic;
     private final MonitorReceivedFogModels monitorReceivedFogModels;
@@ -46,6 +50,16 @@ public class CloudService {
     private final HttpHeaders formHeaders = createFormHeaders();
     private final StopWatch stopWatch;
 
+    /**
+     * Initializes the global process for cloud model creation and monitoring.
+     *
+     * @param isCacheActive            Indicates whether caching is active.
+     * @param geneticEvaluationStrategyArg Genetic evaluation strategy to be used.
+     * @param modelType                The type of model to be initialized.
+     * @return ResponseEntity indicating the status of the operation.
+     * @throws IOException              If an I/O error occurs.
+     * @throws InterruptedException     If the process is interrupted.
+     */
     public ResponseEntity<?> initializeGlobalProcess(Boolean isCacheActive, String geneticEvaluationStrategyArg,
                                                      String modelType) throws IOException, InterruptedException {
 
@@ -70,6 +84,17 @@ public class CloudService {
         return response;
     }
 
+    /**
+     * Executes the initial global process, including clearing caches, notifying fog nodes,
+     * and broadcasting the dummy model.
+     *
+     * @param isCacheActive            Indicates whether caching is active.
+     * @param geneticEvaluationStrategy The genetic evaluation strategy to be applied.
+     * @param modelType                The type of model to be initialized.
+     * @return ResponseEntity indicating the status of the operation.
+     * @throws IOException              If an I/O error occurs.
+     * @throws InterruptedException     If the process is interrupted.
+     */
     public ResponseEntity<?> executeInitialGlobalProcess(Boolean isCacheActive, GeneticEvaluationStrategy geneticEvaluationStrategy,
                                                          String modelType)
             throws IOException, InterruptedException {
@@ -110,6 +135,11 @@ public class CloudService {
         return ResponseEntity.ok("Initialization and transmission of cloud models successfully terminated!");
     }
 
+    /**
+     * Creates HTTP headers for file transmission using multipart form data.
+     *
+     * @return HttpHeaders configured for multipart form data communication.
+     */
     private HttpHeaders createFormHeaders() {
         // create a global communication header for  file transmission
         HttpHeaders headers = new HttpHeaders();
@@ -117,6 +147,11 @@ public class CloudService {
         return headers;
     }
 
+    /**
+     * Notifies edges about the dummy model type via fog nodes.
+     *
+     * @param modelType The type of dummy model to be used.
+     */
     private void notifyEdgesAboutDummyModelViaFog(String modelType) {
 
         // notification header setting
@@ -139,18 +174,25 @@ public class CloudService {
         }
     }
 
+    /**
+     * Broadcasts the initial dummy model to fog nodes for further transmission to edge nodes.
+     *
+     * @param dummyModel               The dummy model file to be broadcasted.
+     * @param isCacheActive            Indicates whether caching is active.
+     * @param geneticEvaluationStrategy The genetic evaluation strategy to be applied.
+     */
     private void initialBroadcastToFogs(File dummyModel, Boolean isCacheActive, GeneticEvaluationStrategy
             geneticEvaluationStrategy) {
 
         // start and end date for initial training chosen based on dataset
-        List<String> dates = List.of("2012-07-09", "2013-07-09");
+        List<String> dates = List.of("2017-04-20", "2018-04-20");
         if (!dummyModel.exists()) {
             System.out.println("Dummy model does not exists.");
         } else {
             FileSystemResource resource = new FileSystemResource(dummyModel);
 
             // start the cooling schedule of the temperature in the cloud node
-            coolingSchedule.startCooling();
+            cloudCoolingSchedule.startCloudCoolingScheduleThread();
 
             // call the broadcast function with arguments the dummy model and the rest of training configuration
             cloudServiceUtils.broadcast(resource, dates, restTemplate, formHeaders, concurrencyManager, isCacheActive,
@@ -158,6 +200,13 @@ public class CloudService {
         }
     }
 
+    /**
+     * Performs the daily federation process, broadcasting the global model and managing the training round.
+     *
+     * @param date                     The date for which the federation is being executed.
+     * @param isCacheActive            Indicates whether caching is active.
+     * @param geneticEvaluationStrategyArg The genetic evaluation strategy to be used.
+     */
     public void dailyFederation(String date, Boolean isCacheActive, String geneticEvaluationStrategyArg) {
 
         // if cache state option active, load the previous saved state
@@ -182,7 +231,7 @@ public class CloudService {
             FileSystemResource resource = new FileSystemResource(globalModelFile);
 
             // start this round cooling schedule of the temperature
-            coolingSchedule.startCooling();
+            cloudCoolingSchedule.startCloudCoolingScheduleThread();
 
             // broadcast the global model to the fogs with this round training configuration
             cloudServiceUtils.broadcast(resource, List.of(date), restTemplate, formHeaders, concurrencyManager,
@@ -192,6 +241,15 @@ public class CloudService {
         }
     }
 
+    /**
+     * Processes the result received from a fog node, including saving the model and updating results.
+     *
+     * @param result      The result data received from the fog node.
+     * @param currentDate The current date of the operation.
+     * @param fogName     The name of the fog node.
+     * @param file        The file containing the fog model.
+     * @throws IOException If an I/O error occurs while processing the file.
+     */
     public void processReceivedResultFromFog(String result, String currentDate, String fogName, MultipartFile file)
             throws IOException {
 
@@ -238,6 +296,9 @@ public class CloudService {
         }
     }
 
+    /**
+     * Starts monitoring the incoming fog models through a scheduled task.
+     */
     public void startMonitoringReceivedFogModels() {
         // thread scheduler executing class MonitorReceivedFogModels (Runnable) for listening to incoming fog models
         System.out.println("Starting to monitor cooling schedule...");
@@ -245,6 +306,14 @@ public class CloudService {
                 TimeUnit.SECONDS);
     }
 
+    /**
+     * Saves a file received from a fog node.
+     *
+     * @param file        The file to be saved.
+     * @param directory   The directory where the file will be saved.
+     * @param fileName    The name of the file.
+     * @throws IOException If an I/O error occurs while saving the file.
+     */
     private void saveFile(MultipartFile file, File directory, String fileName) throws IOException {
         // TODO check if can be moved to a utility class
         // utility function to save the received file
@@ -255,6 +324,15 @@ public class CloudService {
         concurrencyManager.getFoundPrinterCounter().set(0);
     }
 
+    /**
+     * Updates the results JSON file with the received data from a fog node.
+     *
+     * @param result      The result data.
+     * @param currentDate The current date of the operation.
+     * @param fogName     The name of the fog node.
+     * @param directory   The directory where the results file is stored.
+     * @throws IOException If an I/O error occurs while updating the file.
+     */
     private void updateResultsJson(String result, String currentDate, String fogName, File directory)
             throws IOException {
         // TODO check if can be moved to a utility class
@@ -270,6 +348,13 @@ public class CloudService {
         writeResultsToJson(resultsMap, resultsFile);
     }
 
+    /**
+     * Reads the existing results from a JSON file.
+     *
+     * @param resultsFile The JSON file containing the results.
+     * @return A map of fog names to their results.
+     * @throws IOException If an I/O error occurs while reading the file.
+     */
     private Map<String, Map<String, String>> readResultsFromJson(File resultsFile) throws IOException {
         // TODO check if can be moved to a utility class
         // utility function to read already written results in the json file
@@ -283,6 +368,13 @@ public class CloudService {
         }
     }
 
+    /**
+     * Writes the results to a JSON file.
+     *
+     * @param resultsMap  The map of results to be written.
+     * @param resultsFile The JSON file where results will be saved.
+     * @throws IOException If an I/O error occurs while writing to the file.
+     */
     private void writeResultsToJson(Map<String, Map<String, String>> resultsMap, File resultsFile) throws IOException {
         // TODO check if can be moved to a utility class
         // utility function to write results in the json file
@@ -291,35 +383,67 @@ public class CloudService {
         }
     }
 
+    /**
+     * Retrieves the current cooling temperature.
+     *
+     * @return ResponseEntity containing the cooling temperature.
+     */
     public ResponseEntity<?> getCoolingTemperature() {
         // get method to return as response when requested the cooling cooler temperature
-        if (coolingSchedule.getIsCoolingOperational()) {
-            return ResponseEntity.ok(coolingSchedule.getTemperature());
+        if (cloudCoolingSchedule.getIsCoolingOperational()) {
+            return ResponseEntity.ok(cloudCoolingSchedule.getTemperature());
         } else {
             return ResponseEntity.ok(0.0);
         }
     }
 
+    /**
+     * Creates a chart visualizing the elapsed time for global operations.
+     *
+     * @return ResponseEntity indicating the status of the operation.
+     * @throws IOException          If an I/O error occurs.
+     * @throws InterruptedException If the process is interrupted.
+     */
     public ResponseEntity<?> createElapsedTimeChart() throws IOException, InterruptedException {
         // initiate the creation of elapsed global time chart
         return statisticsGenerator.createElapsedTimeChart();
     }
 
+    /**
+     * Creates a chart visualizing the elapsed time for each fog node.
+     *
+     * @return ResponseEntity indicating the status of the operation.
+     */
     public ResponseEntity<?> createElapsedTimeChartFogLayer() {
         // initiate the creation of elapsed time chart for each fog
         return statisticsGenerator.createElapsedTimeChartsFogLayer(restTemplate);
     }
 
+    /**
+     * Creates a chart visualizing the traffic data across nodes.
+     *
+     * @return ResponseEntity indicating the status of the operation.
+     */
     public ResponseEntity<?> createTrafficChart() {
         // initiate the creation of overall traffic chart
         return statisticsGenerator.createTrafficChart(restTemplate);
     }
 
+    /**
+     * Creates a chart visualizing the performance of the system.
+     *
+     * @return ResponseEntity indicating the status of the operation.
+     */
     public ResponseEntity<?> createPerformanceChart() {
         // initiate the creation of performance chart
         return statisticsGenerator.createPerformanceChart(restTemplate);
     }
 
+    /**
+     * Loads the system state by notifying fogs and loading previously saved configurations.
+     *
+     * @return ResponseEntity indicating the status of the operation.
+     */
     public ResponseEntity<?> loadSystemState() {
         // retransmit the network configuration to children nodes
         cloudServiceUtils.notifyFogAboutCloud(restTemplate);
@@ -339,6 +463,12 @@ public class CloudService {
         return ResponseEntity.ok("Loaded fog states.");
     }
 
+    /**
+     * Parses the genetic evaluation strategy from a string argument.
+     *
+     * @param geneticEvaluationStrategyArg The string representation of the genetic evaluation strategy.
+     * @return The corresponding GeneticEvaluationStrategy enum value.
+     */
     private GeneticEvaluationStrategy findGeneticEvaluationStrategy(String geneticEvaluationStrategyArg) {
         geneticEvaluationStrategyArg = geneticEvaluationStrategyArg.replace("\"", "");
 
