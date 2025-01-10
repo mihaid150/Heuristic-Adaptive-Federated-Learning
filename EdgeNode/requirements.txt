@@ -1,0 +1,7 @@
+tensorflow
+pandas
+scikit-learn
+argparse
+scipy
+protobuf==3.20.*
+matplotlib
