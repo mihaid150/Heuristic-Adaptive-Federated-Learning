@@ -1,5 +1,6 @@
 # Heuristic-Adaptive Federated Learning Framework
-** README.md writing in working...**
+**README.md writing in working...**
+
 This project aims to create a comprehensive solution for deploying and simulating a Federated Learning network which comes with a novel approach to optimize the model learning process. It is consisting of two main heuristical algorithms, Simulated Annealing and Genetic Algorithm. On one side we create a tailored solution for balancing the exploration/exploation search for performant models while on the training process we are searching at the level of each cluster of clients, training hyper-parameters to ensure a reliable optimization process.
 
 ## Table of Contents
@@ -131,4 +132,5 @@ network:
 ~$ sudo netplan apply
 ```
 #### 2.2 Prerequisites
-** README.md writing in working...**
+
+**README.md writing in working...**
