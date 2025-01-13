@@ -31,3 +31,5 @@ The system follows a cloud-fog-edge hierarchy topology:
 1. **Cloud Node** Aggregates models, process performance and other statistics data, orchestrates fog and edge nodes, runs a simulated annealer for providing to fog nodes a temperature-based genetic offsprings evolution.
 2. **Fog Node** Intermediate layer for aggregating edge retrained model, orchestrates the evaluation and training edge nodes, runs the simulated annealer for model selection, runs the genetic engine for hyper-parameters optimization.
 3. **Edge Node** Generate and (re)trains the local edge models based on the privately stored data.
+
+<img src="./images/architecture-diagram.png" alt="Architecture Diagram" width="50%">
