@@ -26,10 +26,24 @@ In our solution we are using a hierarchical topology of the network splitted in 
  - Modular design for extensibility.
  - Caching model files, training statistics and genetic engine configuration for a training flexibility.
 
-# Architecture
+## Architecture
 The system follows a cloud-fog-edge hierarchy topology:
 1. **Cloud Node** Aggregates models, process performance and other statistics data, orchestrates fog and edge nodes, runs a simulated annealer for providing to fog nodes a temperature-based genetic offsprings evolution.
 2. **Fog Node** Intermediate layer for aggregating edge retrained model, orchestrates the evaluation and training edge nodes, runs the simulated annealer for model selection, runs the genetic engine for hyper-parameters optimization.
 3. **Edge Node** Generate and (re)trains the local edge models based on the privately stored data.
 
-<img src="./images/architecture-diagram.png" alt="Architecture Diagram" width="50%">
+<img src="./images/architecture-diagram.png" alt="Architecture Diagram" width="70%">
+
+## Technologies Used
+- **Java (Spring Boot)**: Backend framework.
+- **Python (Tensorflow):** For model creation, handle and aggregation scripts together with heuristic's components.
+- **Docker**: Deploy and containerization.
+- **ReactJS**: Frontend managing platform.
+- **WebSocket**: Real-time communication between FE and BE.
+
+## Setup and installation
+1. Clone the repository
+```
+git clone https://github.com/mihaid150/Heuristic-Adaptive-Federated-Learning
+
+```
