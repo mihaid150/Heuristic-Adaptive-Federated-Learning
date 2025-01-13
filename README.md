@@ -49,7 +49,7 @@ git clone https://github.com/mihaid150/Heuristic-Adaptive-Federated-Learning
 ### 2. Network configuration and prerequisites
 As node devices we used Raspberry Pi 5 and Pi 4 (RPI5/RPI4) boards for the edge layer and some InterCore I3 Workstations for fog and cloud layer. The setup could be done fine also on a network with only RPIs boards or only Intel workstations. Next i will present how to install Ubuntu Server on those two types of nodes.
 
-#### 2.1 Installing Ubuntu Server on a Raspberry Pi Node
+#### 2.1 Installing Ubuntu Server on a Raspberry Pi Node (if the board is not already yet configured)
 a. **Download the Rasbperry Pi Imager**:
    - Visit the [official Raspberry Pi page](https://www.raspberrypi.com/software/) and download the latest version of the Raspberry Pi Imager application whether it is for x86 or macOS.
 b. **Raspberry Pi Image Configuration**:
@@ -61,3 +61,72 @@ b. **Raspberry Pi Image Configuration**:
   <img src="./images/rpi_imager_1.png" alt="Raspberry Pi Imager (1)" width="40%">
 </div>
 <img src="./images/rpi_imager_2.png" alt="Raspberry Pi Imager (2)" width="30%">
+
+c. **Insert the MicroSD Card and Boot**:
+   - Insert the microSD card into Raspberry Pi, connect it to power, and wait for the device to boot. Make sure to connect also a Monitor to the HDMI port and a USB Keyboard for the initial configuration on the board.
+d. **Initial Configuration of the RPI board**:
+   - The first step after the RPI has booted would be to login with the before configured credentials and then upddate the software. Note that the command is after the ```~$ ```
+```
+~$ sudo apt-get update
+~$ sudo apt-get upgrade
+```
+d. **Configure a static IP for the RPI board**:
+   - After the update is completed, proceed with the next step to set a static IP address for the board in the current network. By using a static IP we could make easier connections between nodes and hardcode them in the software as the current framework does not have a dinamically implemented discovery of the federated network nodes.
+   - Next step is to identify the network configuration file used in Ubuntu by Netplan:
+```
+~$ sudo ls /etc/netplan/
+50-cloud-init.yaml
+~$ sudo cat /etc/netplan/50-cloud-init.yaml
+network:
+    version: 2
+    wifis:
+        renderer: networkd
+        wlan0:
+            access-points:
+                <your-network-ssid>:
+                    password: <password>
+            dhcp4: true
+            optional: true
+  
+```
+   - Update the ```50-cloud-init.yaml``` file with the following lines in order to set the IP adress of the board static. It was configured to be static both for ethernet and wifi connection. You can set a mapping rule between the index of the board, e.g. 9, and the associated host address, e.g., 192.168.2.229.
+```
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    eth0:
+      addresses:
+        - 192.168.2.229/24
+      nameservers:
+        addresses:
+          - 8.8.8.8
+          - 8.8.4.4
+      routes:
+        - to: 0.0.0.0/0
+          via: 192.168.2.1
+          metric: 100
+      optional: true
+  wifis:
+    wlan0:
+      access-points:
+        <your-network-ssid>:
+          password: <your-network-password>
+      dhcp4: no
+      addresses:
+        - 192.168.2.229/24
+      nameservers:
+        addresses:
+          - 8.8.8.8
+          - 8.8.4.4
+      routes:
+        - to: 0.0.0.0/0
+          via: 192.168.2.1
+          metric: 200
+      optional: true
+```
+   - After updating the configuration file do the following command and the network address of your board should be configured static and you can proceed to the next step.
+```
+~$ sudo netplan apply
+```
+#### 2.2 Prerequisites
