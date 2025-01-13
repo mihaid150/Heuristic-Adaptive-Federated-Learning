@@ -42,8 +42,22 @@ The system follows a cloud-fog-edge hierarchy topology:
 - **WebSocket**: Real-time communication between FE and BE.
 
 ## Setup and installation
-1. Clone the repository
+### 1. Clone the repository
 ```
 git clone https://github.com/mihaid150/Heuristic-Adaptive-Federated-Learning
-
 ```
+### 2. Network configuration and prerequisites
+As node devices we used Raspberry Pi 5 and Pi 4 (RPI5/RPI4) boards for the edge layer and some InterCore I3 Workstations for fog and cloud layer. The setup could be done fine also on a network with only RPIs boards or only Intel workstations. Next i will present how to install Ubuntu Server on those two types of nodes.
+
+#### 2.1 Installing Ubuntu Server on a Raspberry Pi Node
+a. **Download the Rasbperry Pi Imager**:
+   - Visit the [official Raspberry Pi page](https://www.raspberrypi.com/software/) and download the latest version of the Raspberry Pi Imager application whether it is for x86 or macOS.
+b. **Raspberry Pi Image Configuration**:
+   - Insert the board MicroSD card(I recommend to be at least 64 GB for no futher worries) into the working desktop and open the Raspberry Pi Image app. From the menu, select the storage representing the MicroSD Card, the operating system that we will install (Choose OS -> Other general-purpose OS -> Ubuntu) should be an LST server version for stability reasons so I have chose Ubuntu Server 24.04.1 LTS (64-bit). From the Raspberry Pi Device field I have selected Raspberry Pi 5 (4) depending on node, I recommend to be at least RPI4 with at least 4 GB RAM memory.
+   - After these 3 fields, you can press NEXT and you will be asked if you want some additional customizations and press on EDIT SETTINGS. In the new opened window, set the hostname, the username(I have followed the format *pinodeX* where X can be an index from the ordering rule, e.g., *pinode5*) and the password, configure also the wireless connection with the SSID and password, I recommend to choose a stable network for connection. Then press to SAVE and press YES 2 times and the MicroSD card formatting should begin. When its ready you can plug the MicroSD card into the RPI.
+     
+<div style="display: flex; justify-content: space-around; align-items: center;">
+  <img src="./images/ubuntu_server_version.png" alt="Ubuntu Server Version" width="35%">
+  <img src="./images/rpi_imager_1.png" alt="Raspberry Pi Imager (1)" width="35%">
+  <img src="./images/rpi_imager_2.png" alt="Raspberry Pi Imager (2)" width="20%">
+</div>
