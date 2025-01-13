@@ -57,7 +57,7 @@ b. **Raspberry Pi Image Configuration**:
    - After these 3 fields, you can press NEXT and you will be asked if you want some additional customizations and press on EDIT SETTINGS. In the new opened window, set the hostname, the username(I have followed the format *pinodeX* where X can be an index from the ordering rule, e.g., *pinode5*) and the password, configure also the wireless connection with the SSID and password, I recommend to choose a stable network for connection. Then press to SAVE and press YES 2 times and the MicroSD card formatting should begin. When its ready you can plug the MicroSD card into the RPI.
      
 <div style="display: flex; justify-content: space-around; align-items: center;">
-  <img src="./images/ubuntu_server_version.png" alt="Ubuntu Server Version" width="35%">
-  <img src="./images/rpi_imager_1.png" alt="Raspberry Pi Imager (1)" width="35%">
-  <img src="./images/rpi_imager_2.png" alt="Raspberry Pi Imager (2)" width="20%">
+  <img src="./images/ubuntu_server_version.png" alt="Ubuntu Server Version" width="40%">
+  <img src="./images/rpi_imager_1.png" alt="Raspberry Pi Imager (1)" width="40%">
 </div>
+<img src="./images/rpi_imager_2.png" alt="Raspberry Pi Imager (2)" width="30%">
