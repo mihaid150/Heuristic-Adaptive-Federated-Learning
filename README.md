@@ -230,4 +230,16 @@ For stopping, restarting or viewing the service status we can type
 ~$ sudo systemctl restart <service_name>
 ~$ systemctl status <service_name>
 ```
+When a service on a node is running, in order to view from the docker perspective the status and output use
+```
+~$ docker logs -f <container_name>
+```
+Sometimes to interact with the container and the files inside it you just type the following command and will be moved into the command line of the container:
+```
+~$ docker exec -it <container_name> /bin/bash
+# <commands inside container cli>
+```
+
+## Usage
+
 **README.md writing in working...**
