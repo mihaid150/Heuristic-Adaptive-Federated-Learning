@@ -44,7 +44,7 @@ The system follows a cloud-fog-edge hierarchy topology:
 - **WebSocket**: Real-time communication between FE and BE.
 
 ## Setup and installation
-### 1. Clone the repository
+### 1. Clone the repository on you working computer
 ```
 git clone https://github.com/mihaid150/Heuristic-Adaptive-Federated-Learning
 ```
@@ -133,4 +133,101 @@ network:
 ```
 #### 2.2 Prerequisites
 
+a. **Installing and configuring Docker**:
+  - In order to run in a containerized environment our applications for the network nodes, we will have to install and configure Docker as in the following commands.
+  - Update the Package Index:
+```
+~$ sudo apt update
+~$ sudo apt upgrade -y
+```
+  - Install Docker related dependencies:
+```
+~$ sudo apt install -y ca-certificates curl gnupg lsb-release
+```
+  - Add Docker's official gpg key:
+```
+~$ sudo mkdir -p /etc/apt/keyrings
+~$ curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+```
+  - Set up the docker repository:
+```
+~$ echo \
+  "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+  $(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+```
+  - Install the Docker engine:
+```
+~$ sudo apt update
+~$ sudo apt install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+```
+  - Verify Docker installation:
+```
+~$  docker --version
+```
+  - Manage Docker as non-root user:
+```
+~$ sudo groupadd docker
+~$ sudo usermod -aG docker $USER
+```
+### 2. Prepare the Spring Boot Application and the Backend
+
+As we mentioned earlier, the node backend is based on Java (Spring Boot) and in order to be able to run the application on the Ubuntu server we should compile the app as a .jar file from the Maven menu on the right side of the Intellij window where we would have the option *"install"* and press it. This will generate the java archive file on the *target* folder of the folder. 
+
+The files that you will have to move from your working computer to each node server are: .jar file (e.g., *EdgeNode-1.0-SNAPSHOT.jar *) with the archive of the Spring Boot application, the *Dockerfile* together with the *requirements.txt*, this python scripts folder containing the python files which can be found in the *resources* folder of each Spring Boot app. Besides this, you will have to copy on each edge node the *.csv* file with the private dataset. You can copy all these files either by using the [WinSCP app](https://winscp.net/eng/download.php) or by using the CLI command ```~$ pscp <file_1_path> <file_2_path> ... <file_n_path> <remote_path, e.g., pinode6@192.168.2.226:/tmp>```.
+
+We would also need some additional folders to create on the node server such as *cache_json*  or *logs* and they can be created using the command ```~$ mkdir <folder_path>```. After all required files for the containered app are present on the server, one would need to build the docker image. For the name of the images we followed these 3 names in all nodes: *cloudnode_image*, *fognode_image* and *edgenode_image*. The ```.``` would represent the path of the *Dockerfile*.
+```
+docker build -t edgenode_image .
+```
+As the application is updated, therefore also the image, building new images leaves back some dangling images of name *<none>* and we can remove them by their image id.
+```
+~$ docker images
+~$ docker rmi <image_id>
+```
+A image can be run in order to obtain a container so therefore to run the application inside the docker container:
+```
+~$ docker run <image_name>
+```
+To efficientize the process. we configured our RPI boards such that when they have finished the boot proccess, to start the docker container automatically. This can be achieved by building a *daemon systemcl service*. Here we also chosen to name the services as *cloudnode.service*, *fognode.service* and *edgenode.service*.
+```
+~$ cd /etc/systemd/system
+~$ sudo touch <service_name>.service
+~$ sudo vim <service_name>.service
+```
+Next, we will write the service configuration file. For the container names, we selected to be like *cloudnode_container*, *fognode_container* and *edgenode_container*. Sometimes we would like that the logs comming from the container to be saved for later observations after the container has exited so we save the logs in a dedicated file with the date when container has run. For a node like *pinode6*, the configuration looks like:
+```
+[Unit]
+Description=EdgeNode Docker Container
+After=docker.service
+Requires=docker.service
+
+[Service]
+User=pinode6
+Restart=always
+ExecStart=/bin/bash -c 'mkdir -p /home/pinode6/edgenode/logs && \
+    LOG_FILE="/home/pinode6/edgenode/logs/edgenode_container_$(date +%%Y%%m%%d_%%H%%M%%S).log" && \
+    /usr/bin/docker run --rm --name edgenode_container \
+    -p 8080:8080 \
+    -v /home/pinode6/edgenode/cache_json:/app/cache_json \
+    -v /home/pinode6/edgenode/evaluation:/app/evaluation \
+    edgenode_image > "$LOG_FILE" 2>&1'
+ExecStop=/usr/bin/docker stop edgenode_container
+
+[Install]
+WantedBy=multi-user.target
+```
+After saving our configuration file, the next step is to enable the service:
+```
+~$ sudo systemctl enable <service_name>
+```
+We can write the service witout the *.service* termination in the command to reference it. And now just start the service
+```
+~$ sudo systemctl start <service_name>
+```
+For stopping, restarting or viewing the service status we can type
+```
+~$ sudo systemctl stop <service_name>
+~$ sudo systemctl restart <service_name>
+~$ systemctl status <service_name>
+```
 **README.md writing in working...**
