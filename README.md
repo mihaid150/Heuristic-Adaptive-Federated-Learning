@@ -241,5 +241,41 @@ Sometimes to interact with the container and the files inside it you just type t
 ```
 
 ## Usage
+There are two ways in which we can run the simulation on the federated network: either by calling from an application like Postman the endpoints exposed by the CloudNode, either by lauching the Web App and controlling the simulation from there. In the first case we would have to manually configure the endpoints APIs, while in the case of the application we would just select the options from some fields. The CloudNode is the orchestrator of this process, which can start, coordinate and end the executions of the tasks. 
+
+The options that can be configured are the following ones:
+### 1. CloudNode IP Address:
+As we have seen in the network configuration section, we have statically assigned the IP of each node to ensure an easier use of the communication between instances. In the basic case, all the nodes have the same private network address, ours being configured to be ```192.168.2.X``` and the cloud node is have the host ```220``` so the cloud IP would results as being ```192.168.2.220```. The backend is communicating via the *http* protocol at the port *8080*. 
+
+### 2. Federation Type:
+The training schedule it is composed of two stages, the first being the initial training where we do a pre-training on a period of one year for the model, and the second stage being formed by the sequentially daily retrainings. The user can choose from 3 variants, just an *Initial Federation*, just a *Daily Federation*, or both combined in *Full Federation*.
+
+### 3. Cache the request:
+One of the framerwork's feature is to save the model as a file between the traininig stages so that if the application ends intentionally or unintentionally, to be able to reload the model and continue the training. Beside the model file, we can save the trafficand elapsed time measured, and the fitness values and population from the genetic engine to not start from the beginning the fine-tunning process. So it's just a boolean *True* or *False* for this option.
+
+### 5. Training date:
+The pre-training period was predefined and established in the application but the daily traininings period can be inputed when a daily or full federation was selected before. T
+
+### 6. Evolution type:
+During the evolution process of the genetic engine, the individuals would be updated with mutation and crossover genetic operations. The questions is what proportion of the population would be updated. One strategy, ```Update All Individuals``` would be to apply the operations on all individuals, another ```Update Bottom Individuals``` to apply only on the least fitting individuals from the population that could we consider on the bottom, and the last, ```Update Random Individuals```, to update them in a random manner.
+
+### 7. Model type
+This refers to choose which model to use in the training or better saying what architecture to use because every model can be a combination of layers and parameters. The current one is ```LSTM Model``` but you can update it to come with new architectures or models.
+
+When all the fields have been completed, one could press the *Start Federation* button and the request with the created endpoint will be send to cloud node which will initiate the simulation. We are also using a websocket to retrieve the status and the logs of the simulation in the dedicated windows below the button. 
+
+<img src="./images/federated_app_gui.png" alt="Federated Application Web GUI" width="50%">
+
+## APIs
+### CloudNode APIs
+This section is more oriented for Postman usage of the framework. To the following apis, do not forget to add the network address of the cloud, ours being ```https://192.168.2.220:8080```:
+
+| Endpoint                                                                        | Method | Description                                         |
+|---------------------------------------------------------------------------------|--------|-----------------------------------------------------|
+| `/cloud/init/{isCacheActive}/{geneticEvaluationStrategy}/{modelType}`           | POST   | Run the initial iteration of pre-training.          |
+| `/cloud/daily-federation/{isCacheActive}/{date}/   {geneticEvaluationStrategy}`    | POST   | Run the daily iteration of pre-training.            |
+| `/cloud/elapsed-time-chart`                                                     | POST   | Create a chart with the time elapsed per iteration. |
+| `/cloud/create-traffic-chart`                                                   | POST   | Create a chart with the traffic across nodes.       |
+| `/cloud/create-performance-chart`                                               | POST   | Create a chart with the performance of global model.|
 
 **README.md writing in working...**
