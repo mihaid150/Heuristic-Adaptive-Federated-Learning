@@ -1,5 +1,8 @@
-# Heuristic-Adaptive Federated Learning Framework
-**README.md writing in working...**
+<div align="center">
+  <img src="./images/federated_app_logo.svg" alt="Project Logo" width="200"> 
+</div>
+
+ # Heuristic-Adaptive Federated Learning Framework
 
 This project aims to create a comprehensive solution for deploying and simulating a Federated Learning network which comes with a novel approach to optimize the model learning process. It is consisting of two main heuristical algorithms, Simulated Annealing and Genetic Algorithm. On one side we create a tailored solution for balancing the exploration/exploation search for performant models while on the training process we are searching at the level of each cluster of clients, training hyper-parameters to ensure a reliable optimization process.
 
@@ -11,9 +14,6 @@ This project aims to create a comprehensive solution for deploying and simulatin
 - [Setup and Installation](#setup-and-installation)
 - [Usage](#usage)
 - [APIs](#apis)
-- [Project Structure](#project-structure)
-- [Contributing](#contributing)
-- [License](#license)
 
 ## Overview
 Federated Learning is a distributed machine learning process in which the learning part it is decoupled from a deep large model into multiple smaller collaborating models. Its distributed nature imposes a client-server approach in which there would be several clients holding the private data and one or more servers which would aggregate the resulting models and share them back again for retraining. 
