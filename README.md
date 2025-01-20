@@ -11,6 +11,7 @@ This project aims to create a comprehensive solution for deploying and simulatin
 - [Features](#features)
 - [Architecture](#architecture)
 - [Technologies Used](#technologies-used)
+- [Implementation](#implementation)
 - [Setup and Installation](#setup-and-installation)
 - [Usage](#usage)
 - [APIs](#apis)
@@ -42,6 +43,13 @@ The system follows a cloud-fog-edge hierarchy topology:
 - **Docker**: Deploy and containerization.
 - **ReactJS**: Frontend managing platform.
 - **WebSocket**: Real-time communication between FE and BE.
+
+## Implementation
+### Conceptual Diagram
+<img src="./images/conceptual_diagram.png" alt="Conceptual Diagram" width="90%">
+
+### Components Diagram
+<img src="./images/components_diagram.png" alt="Components Diagram" width="90%">
 
 ## Setup and installation
 ### 1. Clone the repository on you working computer
