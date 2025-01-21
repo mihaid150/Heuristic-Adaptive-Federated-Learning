@@ -8,12 +8,15 @@ from fed_node.node_state import NodeState
 from model_manager import create_initial_lstm_model
 from cloud_resources_paths import CloudResourcesPaths
 from fastapi import HTTPException
+from cloud_cooling_scheduler import CloudCoolingScheduler
 
 
 class CloudService:
     RABBITMQ_HOST = "localhost"
     SEND_QUEUE = "cloud_to_fog_queue"
     RECEIVE_QUEUE = "fog_to_cloud_queue"
+
+    cooling_scheduler = CloudCoolingScheduler()
 
     @staticmethod
     def init_rabbitmq():
@@ -82,6 +85,9 @@ class CloudService:
             channel.basic_publish(exchange="", routing_key=CloudService.SEND_QUEUE, body=str(message))
             print(f"Request sent to queue for child {child_node.name} ({child_node.ip_address}:{child_node.port})")
 
+        # initialize the cloud cooling scheduler
+        CloudService.cooling_scheduler.start_cooling()
+
         connection.close()
 
     @staticmethod
@@ -107,7 +113,7 @@ class CloudService:
             received_messages = {}
             start_time = time.time()
 
-            while time.time() - start_time < timeout:
+            while CloudService.cooling_scheduler.is_cooling_operational and time.time() - start_time < timeout:
                 method_frame, header_frame, body = channel.basic_get(queue=CloudService.RECEIVE_QUEUE, auto_ack=True)
                 if body:
                     message = json.loads(body.decode('utf-8'))
@@ -125,7 +131,7 @@ class CloudService:
                 for child_id, message in received_messages.items():
                     print(f"Processing message from child {child_id}: {message}")
             else:
-                print(f"No messages received from any child nodes within the timeout.")
+                print(f"No messages received from any child nodes within the timeout. We keep the current cloud model.")
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
         except Exception as e:
