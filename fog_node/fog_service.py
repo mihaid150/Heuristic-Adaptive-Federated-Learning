@@ -5,6 +5,7 @@ import threading
 import pika
 from fed_node.node_state import NodeState
 from fog_resources_paths import FogResourcesPaths
+from genetics.genetic_engine import GeneticEngine
 
 
 class FogService:
@@ -15,10 +16,12 @@ class FogService:
     FOG_RABBITMQ_HOST = "fog-rabbitmq-host"
     FOG_EDGE_SEND_QUEUE = "fog_to_edge_queue"
     EDGE_FOG_RECEIVE_QUEUE = "edge_to_fog_queue"
+    genetic_engine = GeneticEngine(5, 5, 2)
 
     @staticmethod
     def init_process() -> None:
         FogService.init_rabbitmq()
+        FogService.genetic_engine.setup()
         listener_thread = threading.Thread(target=FogService.listen_to_cloud_receiving_queue, daemon=True)
         listener_thread.start()
 
@@ -62,9 +65,9 @@ class FogService:
                 message = json.loads(body.decode("utf-8"))
                 child_id = message.get("child_id")
 
-                # check of the message is intended for this fog node
+                # check if the message is intended for this fog node
                 if child_id == NodeState.get_current_node().id:
-                    FogService.process_received_message(message)
+                    FogService.orchestrate_training(message)
                 else:
                     print(f"Ignoring message for child id {child_id}.")
             except Exception as e:
@@ -75,12 +78,14 @@ class FogService:
         channel.start_consuming()
 
     @staticmethod
-    def process_received_message(message):
+    def orchestrate_training(message):
         """
         Process a received message from cloud node.
         :param message: The received message containing the payload and model file.
         """
         try:
+            start_date = message.get("start_date")
+            current_date = message.get("current_date")
             is_cache_active = message.get("is_cache_active")
             genetic_evaluation_strategy = message.get("genetic_evaluation_strategy")
             model_type = message.get("model_type")
@@ -103,16 +108,29 @@ class FogService:
             print(f"Received cloud model saved at: {fog_model_file_path}")
 
             # handle the received payload
-            print(f"Processing with cache_active: {is_cache_active}, strategy: {genetic_evaluation_strategy}")
-            FogService.forward_model_to_edges(model_file_base64, is_cache_active, genetic_evaluation_strategy,
-                                              model_type)
+            print(f"Processing with start_date: {start_date}, current_date: {current_date}, cache_active: "
+                  f"{is_cache_active}, strategy: {genetic_evaluation_strategy}")
+
+            # run the genetic engine
+            if start_date is not None:
+                FogService.genetic_engine.set_evaluation_data_date([start_date, current_date])
+            else:
+                FogService.genetic_engine.set_evaluation_data_date([current_date])
+            FogService.genetic_engine.evolve()
+
+            # get top individuals for each fog child
+            top_individuals = FogService.genetic_engine.get_top_k_individuals(
+                len(NodeState.get_current_node().child_nodes))
+
+            FogService.forward_model_to_edges(model_file_base64, start_date, current_date, is_cache_active,
+                                              genetic_evaluation_strategy, model_type, top_individuals)
 
         except Exception as e:
             print(f"Error processing the received message: {str(e)}")
 
     @staticmethod
-    def forward_model_to_edges(model_file_base64: str, is_cache_active: bool, genetic_evaluation_strategy: str,
-                               model_type: str) -> None:
+    def forward_model_to_edges(model_file_base64: str, start_date: str, current_date: str, is_cache_active: bool,
+                               genetic_evaluation_strategy: str, model_type: str, top_individuals) -> None:
         """
         Forward the received model and payload to all child edge nodes.
         """
@@ -123,16 +141,25 @@ class FogService:
         if not current_node:
             raise ValueError("Current fog node is not initialized.")
 
-        for edge_node in current_node.child_nodes:
+        for index, edge_node in enumerate(current_node.child_nodes):
+            individual = top_individuals[index]
             message = {
                 "child_id": edge_node.id,
+                "start_date": start_date,
+                "current_date": current_date,
                 "is_cache_active": is_cache_active,
                 "genetic_evaluation_strategy": genetic_evaluation_strategy,
                 "model_type": model_type,
-                "model_file": model_file_base64
+                "model_file": model_file_base64,
+                "learning_rate": individual[0],
+                "batch_size": individual[1],
+                "epochs": individual[2],
+                "patience": individual[3],
+                "fine_tune_layers": individual[4]
             }
 
             channel.basic_publish(exchange="", routing_key=FogService.FOG_EDGE_SEND_QUEUE, body=json.dumps(message))
             print(f"Forwarded model to edge {edge_node.name} ({edge_node.ip_address}:{edge_node.port})")
 
         connection.close()
+
