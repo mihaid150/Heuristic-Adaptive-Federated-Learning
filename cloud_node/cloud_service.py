@@ -44,7 +44,8 @@ class CloudService:
         }
 
     @staticmethod
-    def init_process(is_cache_active: bool, genetic_evaluation_strategy: str, model_type: str):
+    def init_process(start_date: str, end_date: str, is_cache_active: bool, genetic_evaluation_strategy: str,
+                     model_type: str):
         CloudService.init_rabbitmq()
 
         # create the LSTM model
@@ -62,6 +63,8 @@ class CloudService:
 
         # prepare the payload
         payload = {
+            "start_date": start_date,
+            "end_date": end_date,
             "is_cache_active": is_cache_active,
             "genetic_evaluation_strategy": genetic_evaluation_strategy,
             "model_type": model_type,

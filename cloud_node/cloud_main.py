@@ -27,7 +27,8 @@ def get_cloud_status():
 @cloud_router.post(RoutingPaths.CLOUD_INIT)
 def init_cloud_process(request: InitProcessRequest):
     try:
-        CloudService.init_process(request.is_cache_active, request.genetic_evaluation_strategy, request.model_type)
+        CloudService.init_process(request.start_date, request.end_date, request.is_cache_active,
+                                  request.genetic_evaluation_strategy, request.model_type)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
