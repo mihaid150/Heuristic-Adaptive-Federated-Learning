@@ -1,5 +1,5 @@
 import uvicorn
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException
 
 from cloud_node.cloud_service import CloudService
 from cloud_node.request_templates import InitProcessRequest
@@ -30,11 +30,6 @@ def init_cloud_process(request: InitProcessRequest):
         CloudService.init_process(request.is_cache_active, request.genetic_evaluation_strategy, request.model_type)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-
-
-@cloud_router.post(RoutingPaths.CLOUD_GET_FOG_MODEL)
-def get_fog_model():
-    CloudService.get_fog_model()
 
 
 if __name__ == "__main__":
