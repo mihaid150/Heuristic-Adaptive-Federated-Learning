@@ -11,11 +11,12 @@ from cloud_cooling_scheduler import CloudCoolingScheduler
 
 
 class CloudService:
-    CLOUD_RABBITMQ_HOST = "cloud-rabbitmq-host"
-    SEND_QUEUE = "cloud_to_fog_queue"
-    RECEIVE_QUEUE = "fog_to_cloud_queue"
 
-    cooling_scheduler = CloudCoolingScheduler()
+    CLOUD_RABBITMQ_HOST = "cloud-rabbitmq-host"
+    CLOUD_FOG_SEND_QUEUE = "cloud_to_fog_queue"
+    FOG_CLOUD_RECEIVE_QUEUE = "fog_to_cloud_queue"
+
+    cloud_cooling_scheduler = CloudCoolingScheduler()
     received_fog_messages = {}
 
     @staticmethod
@@ -27,8 +28,8 @@ class CloudService:
         channel = connection.channel()
 
         # declare the queues for sending and receiving messages
-        channel.queue_declare(queue=CloudService.SEND_QUEUE)
-        channel.queue_declare(queue=CloudService.RECEIVE_QUEUE)
+        channel.queue_declare(queue=CloudService.CLOUD_FOG_SEND_QUEUE)
+        channel.queue_declare(queue=CloudService.FOG_CLOUD_RECEIVE_QUEUE)
         connection.close()
 
     @staticmethod
@@ -86,11 +87,11 @@ class CloudService:
                 **payload,
             }
 
-            channel.basic_publish(exchange="", routing_key=CloudService.SEND_QUEUE, body=str(message))
+            channel.basic_publish(exchange="", routing_key=CloudService.CLOUD_FOG_SEND_QUEUE, body=str(message))
             print(f"Request sent to queue for child {child_node.name} ({child_node.ip_address}:{child_node.port})")
 
         # initialize the cloud cooling scheduler
-        CloudService.cooling_scheduler.start_cooling()
+        CloudService.cloud_cooling_scheduler.start_cooling()
 
         listener_thread = threading.Thread(target=CloudService.listen_to_receive_fog_queue, daemon=True)
         listener_thread.start()
@@ -104,14 +105,14 @@ class CloudService:
         :param body: The actual message body.
         """
         try:
-            if not CloudService.cooling_scheduler.is_cloud_cooling_operational():
+            if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
                 print("Cooling process has finished. Ignoring further messages.")
                 aggregate_fog_models(CloudService.received_fog_messages)
                 return
 
             # Deserialize the message
             message = json.loads(body.decode('utf-8'))
-            child_id = message.get("child_id")
+            child_id = message.get("fog_id")
 
             # Process the message
             if child_id not in CloudService.received_fog_messages:
@@ -138,7 +139,7 @@ class CloudService:
 
         if len(CloudService.received_fog_messages) == len(NodeState.get_current_node().child_nodes):
             print("Received messages from all fogs. Stopping the cooling process.")
-            CloudService.cooling_scheduler.stop_cooling()
+            CloudService.cloud_cooling_scheduler.stop_cooling()
             aggregate_fog_models(CloudService.received_fog_messages)
 
     @staticmethod
@@ -151,24 +152,17 @@ class CloudService:
         connection = pika.BlockingConnection(pika.ConnectionParameters(host=CloudService.CLOUD_RABBITMQ_HOST))
         channel = connection.channel()
 
-        def callback(body):
+        def callback(ch, method, properties, body):
             """
             RabbitMQ callback to process messages
             """
             CloudService.get_fog_model(body)
 
             # check if cooling has stopped
-            if not CloudService.cooling_scheduler.is_cooling_operational():
+            if not CloudService.cloud_cooling_scheduler.is_cooling_operational():
                 print("Stopping queue listener as cooling process is complete.")
                 channel.stop_consuming()
 
         print("Listening for messages from fog nodes...")
-        channel.basic_consume(queue=CloudService.RECEIVE_QUEUE, on_message_callback=callback, auto_ack=True)
-
-        # start consuming messages
-        try:
-            channel.stop_consuming()
-        except KeyboardInterrupt:
-            print("Manual interrupt received. Stopping queue listener.")
-        finally:
-            connection.close()
+        channel.basic_consume(queue=CloudService.FOG_CLOUD_RECEIVE_QUEUE, on_message_callback=callback, auto_ack=True)
+        channel.start_consuming()
