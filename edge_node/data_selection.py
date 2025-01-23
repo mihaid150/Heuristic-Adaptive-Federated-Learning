@@ -53,16 +53,14 @@ def filter_data_by_day_date(file_path: str, filtering_column_name: str, day_date
 
     try:
         # parse the provided day_date
-        start_date = pd.to_datetime(day_date)
-        end_date = start_date + pd.Timedelta(days=1)
+        day_date = pd.to_datetime(day_date)
 
         for chunk in pd.read_csv(file_path, chunksize=chunk_size):
             # convert the filtering column to datetime, ignoring errors
             chunk[filtering_column_name] = pd.to_datetime(chunk[filtering_column_name], errors='coerce')
 
             # filter the chunk based on the date range
-            filtered_chunk = chunk[(chunk[filtering_column_name] >= start_date) &
-                                   (chunk[filtering_column_name] <= end_date)]
+            filtered_chunk = chunk[(chunk[filtering_column_name] == day_date)]
 
             # if the filtered chunk is not empty, append it to the output file
             if not filtered_chunk.empty:

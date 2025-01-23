@@ -9,3 +9,6 @@ class EdgeResourcesPaths(str, Enum):
     DATA_FOLDER_PATH = "/app/data"
     INPUT_DATA_PATH = "lorem ipsum"
     FILTERED_DATA_PATH = "lorem ipsum"
+
+    CURRENT_DAY_DATA_PATH = "lorem ipsum"
+    NEXT_DAY_DATA_PATH = "lorem ipsum"
