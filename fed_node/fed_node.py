@@ -40,3 +40,6 @@ class ParentFedNode(FedNode):
 class ChildFedNode(FedNode):
     def __init__(self, node_id: int, name: str, fed_node_type: FedNodeType, ip_address: str, port: int) -> None:
         super().__init__(node_id, name, fed_node_type, ip_address, port)
+        self.is_evaluation_node: bool = False
+
+
