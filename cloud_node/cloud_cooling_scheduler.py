@@ -1,8 +1,8 @@
 import math
 import threading
 import time
-
 from enum import Enum
+from shared.logging_config import logger
 
 
 class CoolingStrategy(Enum):
@@ -24,33 +24,42 @@ class CloudCoolingScheduler:
         self.cooling_thread = None
         self.cooling_strategy = cooling_strategy
 
-        # for boltzmann cooling strategy
+        # for Boltzmann cooling strategy
         self.step = 1
+        self.boltzmann_coefficient = 0.001  # Controls the rate of cooling for Boltzmann
 
         # for exponential cooling strategy
-        self.exponential_coefficient = 0.95
+        self.exponential_coefficient = 0.999  # Reduced cooling rate
 
     def _cooling_process(self) -> None:
         """
-        The cooling process that runs periodically in a separate thread
+        The cooling process that runs periodically in a separate thread.
         """
+        counter = 0
         while self.is_cooling_operational:
             with self.lock:
                 if self.temperature > self.cooling_threshold:
                     if self.cooling_strategy == CoolingStrategy.BOLTZMANN:
-                        self.temperature /= math.log(self.step + 1)
+                        self.temperature -= self.boltzmann_coefficient * self.temperature / math.log(self.step + 2)
                     elif self.cooling_strategy == CoolingStrategy.EXPONENTIAL:
                         self.temperature *= self.exponential_coefficient
                     else:
                         raise ValueError("Invalid cooling strategy. Use 'boltzmann' or 'exponential'.")
 
-                    print(f"Cooling... Current temperature: {self.temperature:.4f}")
+                    # Ensure temperature never exceeds the initial value
+                    self.temperature = min(self.temperature, self.initial_temperature)
                     self.step += 1
                 else:
                     self.is_cooling_operational = False
-                    print("Cooling process has reached the cooldown threshold. Stopping...")
-            # fixed-rated scheduling (2 seconds)
-            time.sleep(2)
+                    logger.info("Cooling process has reached the cooldown threshold. Stopping...")
+
+            # Increase counter and log every 12 iterations (i.e., every 60 seconds)
+            counter += 1
+            if counter % 12 == 0:
+                logger.info(f"Cooling... Current temperature: {self.temperature:.4f}")
+
+            # Sleep for 5 seconds between iterations
+            time.sleep(5)
 
     def start_cooling(self):
         """
@@ -60,7 +69,7 @@ class CloudCoolingScheduler:
             self.is_cooling_operational = True
             self.temperature = self.initial_temperature
             self.step = 1
-            print(f"Cooling process started with {self.cooling_strategy} strategy.")
+            logger.info(f"Cooling process started with {self.cooling_strategy} strategy.")
 
         self.cooling_thread = threading.Thread(target=self._cooling_process, daemon=True)
         self.cooling_thread.start()
@@ -74,7 +83,7 @@ class CloudCoolingScheduler:
 
         if self.cooling_thread and self.cooling_thread.is_alive():
             self.cooling_thread.join()
-        print("Cooling process stopped.")
+        logger.info("Cooling process stopped.")
 
     def is_cloud_cooling_operational(self) -> bool:
         return self.is_cooling_operational
