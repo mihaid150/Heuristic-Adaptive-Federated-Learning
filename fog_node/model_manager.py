@@ -1,3 +1,5 @@
+# fog_node/model_manager.py
+
 import os
 import json
 import random
@@ -6,8 +8,9 @@ import numpy as np
 import tensorflow as tf
 from keras.src.losses import MeanSquaredError
 
-from fog_resources_paths import FogResourcesPaths
-from fog_cooling_scheduler import FogCoolingScheduler
+from shared.logging_config import logger
+from fog_node.fog_resources_paths import FogResourcesPaths
+from fog_node.fog_cooling_scheduler import FogCoolingScheduler
 
 
 def save_lambda_prev(lambda_prev) -> None:
@@ -50,7 +53,7 @@ def compute_weighted_score(metrics_for_score):
 
 
 def execute_models_aggregation(fog_cooling_scheduler: FogCoolingScheduler, metrics):
-    print("Running the model aggregation in the fog node.")
+    logger.info("Running the model aggregation in the fog node.")
 
     custom_objects = {'mse': MeanSquaredError()}
 
@@ -76,7 +79,7 @@ def execute_models_aggregation(fog_cooling_scheduler: FogCoolingScheduler, metri
     after_training_score = compute_weighted_score(metrics["after_training"])
 
     if after_training_score < before_training_score:
-        print("Performance score of the after training model is better. Proceeding with aggregation.")
+        logger.info("Performance score of the after training model is better. Proceeding with aggregation.")
         aggregate_models(edge_model_weights, fog_model_weights, mu_new, mu_prev, lambda_prev)
     else:
         delta = after_training_score - before_training_score
@@ -88,10 +91,10 @@ def execute_models_aggregation(fog_cooling_scheduler: FogCoolingScheduler, metri
         factor = np.exp(-delta / (scaled_boltzmann_constant * normalized_temp))
 
         if gamma > factor:
-            print("Aggregating models based on the probability factor.")
+            logger.info("Aggregating models based on the probability factor.")
             aggregate_models(edge_model_weights, fog_model_weights, mu_new, mu_prev, lambda_prev)
         else:
-            print("Keeping the current fog model.")
+            logger.info("Keeping the current fog model.")
 
 
 def softmax(values):
@@ -100,32 +103,32 @@ def softmax(values):
     return exp_values / np.sum(exp_values)
 
 
-def aggregate_models(edge_model_weights, fog_model_weights, mu_new, mu_prev, lambda_prev):
+def aggregate_models(edge_model_weights, fog_model_weights_list, mu_new, mu_prev, lambda_prev):
     weights = softmax([mu_new, mu_prev])
     mu_new_normalized = weights[0]
     mu_prev_normalized = weights[1]
 
-    print(f"Normalized weights -> mu_new: {mu_new_normalized}, mu_prev: {mu_prev_normalized}")
+    logger.info(f"Normalized weights -> mu_new: {mu_new_normalized}, mu_prev: {mu_prev_normalized}")
 
     # perform weighted aggregation of the models
     new_weights = []
-    for edge_layer, fog_layer in zip(edge_model_weights, fog_model_weights):
+    for edge_layer, fog_layer in zip(edge_model_weights, fog_model_weights_list):
         aggregated_layer = ((mu_new_normalized * edge_layer + mu_prev_normalized * fog_layer) /
                             (mu_new_normalized + mu_prev_normalized))
         new_weights.append(aggregated_layer)
 
-    # update fog model with aggregated weights
-    fog_model_weights.set_weights(new_weights)
-
-    # save the updated fog model
-    fog_model_file_path = os.path.join(
-        FogResourcesPaths.MODELS_FOLDER_PATH,
-        FogResourcesPaths.FOG_MODEL_FILE_NAME
+    # update the actual fog model:
+    custom_objects = {'mse': MeanSquaredError()}
+    fog_model = tf.keras.models.load_model(
+        os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH, FogResourcesPaths.FOG_MODEL_FILE_NAME),
+        custom_objects=custom_objects
     )
-    fog_model_weights.save(fog_model_file_path)
-    print(f"Aggregated model saved at: {fog_model_file_path}")
+    fog_model.set_weights(new_weights)
+    fog_model.save(os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH, FogResourcesPaths.FOG_MODEL_FILE_NAME))
+    fog_model_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH, FogResourcesPaths.FOG_MODEL_FILE_NAME)
+    logger.info(f"Aggregated model saved at: {fog_model_path}")
 
     # save the updated lambda_prev value
     lambda_prev += mu_prev
     save_lambda_prev(lambda_prev)
-    print(f"Updated lambda_prev value saved: {lambda_prev}")
+    logger.info(f"Updated lambda_prev value saved: {lambda_prev}")
