@@ -1,14 +1,17 @@
+# fog_node/genetic/genetic_engine.py
+
 import random
 import math
 import os
 import base64
-import pika
-import json
+
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from deap import base, tools
 from scipy.constants import Boltzmann
-from fed_node.node_state import NodeState
+from shared.fed_node.node_state import NodeState
+from shared.logging_config import logger
 from fog_node.fog_resources_paths import FogResourcesPaths
-from fog_node.fog_service import FogService
 
 
 class FitnessMin(base.Fitness):
@@ -33,7 +36,7 @@ class Individual(list):
         """
         learning_rate = random.randint(1, 100)
         batch_size = random.randint(16, 128)
-        epochs = random.randint(1, 100)
+        epochs = random.randint(1, 10)
         patience = random.randint(1, 20)
         fine_tune_layers = random.randint(1, 10)
         return Individual(learning_rate, batch_size, epochs, patience, fine_tune_layers)
@@ -48,7 +51,7 @@ class GeneticEngine:
         :param stagnation_limit: Limit of stagnation for early stopping
         """
         self.population_size = population_size
-        self.number_of_generation = number_of_generations
+        self.number_of_generations = number_of_generations
         self.stagnation_limit = stagnation_limit
         self.toolbox = None
         self.best_fitness = float("inf")
@@ -60,6 +63,9 @@ class GeneticEngine:
         self.number_of_evaluation_nodes = None
         self.number_of_training_nodes = None
         self.genetic_evaluation_strategy = None
+        self.fog_rabbitmq_host = None
+        self.fog_edge_send_exchange = None
+        self.edge_to_fog_queue = None
 
     @staticmethod
     def get_cloud_temperature():
@@ -85,10 +91,14 @@ class GeneticEngine:
         probability = math.exp(-fitness / (self.boltzmann_constant * self.additional_factor * cloud_temperature))
         return random.random() > probability
 
-    def setup(self):
+    def setup(self, fog_rabbitmq_host, fog_edge_send_exchange, edge_to_fog_queue):
         """
         Sets up the DEAP environment, including individuals, population and genetic operators.
         """
+
+        self.fog_rabbitmq_host = fog_rabbitmq_host
+        self.fog_edge_send_exchange = fog_edge_send_exchange
+        self.edge_to_fog_queue = edge_to_fog_queue
 
         # toolbox for operators
         toolbox = base.Toolbox()
@@ -101,138 +111,169 @@ class GeneticEngine:
         toolbox.register("individual", create_individual)
 
         # register population creation
-        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
+        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
 
         # register evaluate function creation
         toolbox.register("evaluate", self.fitness_function)
 
         # genetic operators
         toolbox.register("mate", tools.cxOnePoint)  # crossover
-        toolbox.register("mutate", tools.mutUniformInt, low=[1, 16, 1, 1, 1], up=[100, 120, 100, 20, 10], indpb=0.2)
+        toolbox.register("mutate", tools.mutUniformInt, low=[1, 16, 1, 1, 1], up=[100, 120, 10, 20, 10], indpb=0.2)
         toolbox.register("select", tools.selTournament, tournsize=3)  # selection
 
         self.toolbox = toolbox
 
     def fitness_function(self, individual):
         """
-        Computes the fitness of an individual.
-        :param individual: A list of hyperparameters [learning_rate, batch_size, epochs, patience, fine_tune_layers].
-        :return: The fitness value, lower being better.
+        Synchronously computes the fitness value for an individual by sending a single HTTP POST
+        request to each evaluation node's /execute-model-evaluation endpoint and waiting as long as needed.
+        Missing responses are penalized.
         """
+
+        # TODO: currently is using http request to request the metrics on the edge, in the future change to queue/ws
+
+        logger.info("Starting fitness_function for individual: %s", individual)
+        # Compute hyperparameters from the individual.
         learning_rate = individual[0] / 10000.0
         batch_size = individual[1]
         number_epochs = individual[2]
         patience = individual[3]
         fine_tune_layers = individual[4]
+        logger.info("Hyperparameters: learning_rate=%s, batch_size=%s, epochs=%s, patience=%s, fine_tune_layers=%s",
+                    learning_rate, batch_size, number_epochs, patience, fine_tune_layers)
 
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=FogService.FOG_RABBITMQ_HOST))
-        channel = connection.channel()
-
-        # create a temporary queue for responses
-        result_queue = channel.queue_declare(queue='', exclusive=True)
-        response_queue = result_queue.method.queue
-
-        # generate a unique correlation ID for this fitness evaluation
-        correlation_id = str(random.randint(1, 100000))
-
-        for node in [child for child in NodeState.get_current_node().child_nodes if child.is_evaluation_node]:
+        try:
+            # Read the fog model file once.
             fog_model_file_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH,
                                                FogResourcesPaths.FOG_MODEL_FILE_NAME)
+            logger.info("Reading fog model file from: %s", fog_model_file_path)
             with open(fog_model_file_path, "rb") as model_file:
                 model_bytes = model_file.read()
-                model_file_base64 = base64.b64encode(model_bytes).decode("utf-8")
-
-            message = {
-                "child_id": node.id,
-                "genetic_evaluation": True,
-                "dates": self.operating_data_date,
-                "is_cache_active": False,
-                "model_type": None,  # to be determined
-                "model_file": model_file_base64,
-                "learning_rate": learning_rate,
-                "batch_size": batch_size,
-                "epochs": number_epochs,
-                "patience": patience,
-                "fine_tune_layers": fine_tune_layers
-            }
-
-            channel.basic_publish(
-                exchange="",
-                routing_key=FogService.FOG_EDGE_SEND_QUEUE,
-                body=json.dumps(message),
-                properties=pika.BasicProperties(
-                    reply_to=response_queue,
-                    correlation_id=correlation_id,
-                )
-            )
-
-        # collect responses
-        responses = []
-
-        def on_response(ch, method, properties, body):
-            # check if the response matches the correlation id
-            if properties.correlation_id == correlation_id:
-                responses.append(json.loads(body.decode("utf-8")))
-
-        # start consuming the response queue
-        channel.basic_consume(queue=response_queue, on_message_callback=on_response, auto_ack=True)
-
-        print("Waiting for responses from edge nodes...")
-        while len(responses) < self.number_of_evaluation_nodes:
-            connection.process_data_events()  # process incoming messages
-
-        connection.close()
-
-        if not responses:
-            print("No responses received within the timeout")
+            model_file_base64 = base64.b64encode(model_bytes).decode("utf-8")
+            logger.info("Successfully read fog model file. Encoded length: %d", len(model_file_base64))
+        except Exception as e:
+            logger.error("Error reading fog model file: %s", e)
             return float("inf")
 
-        weights = {
-            "loss": 0.4,  # higher weight for loss
-            "mae": 0.3,  # medium weight for mae
-            "mse": 0.1,  # lower weight for mse since it's redundant loss
-            "rmse": 0.1,  # lower weight for rmse
-            "r2": -0.1,  # negative weight because higher r2 is better
+        # Build a common payload template.
+        payload_template = {
+            "genetic_evaluation": True,
+            "start_date": self.operating_data_date[0] if len(self.operating_data_date) == 2 else None,
+            "current_date": self.operating_data_date[1] if len(self.operating_data_date) == 2 else
+            self.operating_data_date[0],
+            "is_cache_active": False,
+            "model_type": None,
+            "model_file": model_file_base64,
+            "learning_rate": learning_rate,
+            "batch_size": batch_size,
+            "epochs": number_epochs,
+            "patience": patience,
+            "fine_tune_layers": fine_tune_layers
         }
+        logger.info("Payload template built with keys: %s", list(payload_template.keys()))
 
-        def compute_weighted_score(metrics_for_score, weights_for_score):
-            score = 0
-            for metric, weight in weights_for_score.items():
-                score += weight * metrics_for_score[metric]
+        # Get all evaluation nodes.
+        evaluation_nodes = [child for child in NodeState.get_current_node().child_nodes if child.is_evaluation_node]
+        logger.info("Found %d evaluation nodes.", len(evaluation_nodes))
+
+        def send_request(node):
+            payload = payload_template.copy()
+            payload["child_id"] = node.id
+            url = f"http://{node.ip_address}:{node.port}/edge/execute-model-evaluation"
+            logger.info("Sending HTTP POST request to %s with child_id: %s", url, node.id)
+            try:
+                # No timeout is specified so that we wait as long as needed.
+                r = requests.post(url, json=payload, timeout=None)
+                logger.info("Received HTTP response from %s: status code %s", url, r.status_code)
+                if 200 <= r.status_code < 300:
+                    logger.info("Response from %s accepted.", url)
+                    return r.json()
+                else:
+                    logger.error("HTTP error from %s: status code %s", url, r.status_code)
+            except Exception as e:
+                logger.error("HTTP request error to %s: %s", url, e)
+            return None
+
+        valid_responses = []
+        with ThreadPoolExecutor(max_workers=len(evaluation_nodes)) as executor:
+            futures = {executor.submit(send_request, node): node for node in evaluation_nodes}
+            logger.info("Submitted requests to evaluation nodes; waiting for responses...")
+            # Wait for all futures to complete (with no timeout)
+            for future in as_completed(futures):
+                node = futures[future]
+                try:
+                    res = future.result()
+                    if res is not None:
+                        logger.info("Received valid response from node %s", node.id)
+                        valid_responses.append(res)
+                    else:
+                        logger.error("No valid response from node %s", node.id)
+                except Exception as e:
+                    logger.error("Exception while processing response from node %s: %s", node.id, e)
+
+        logger.info("Collected %d valid responses out of required %d.", len(valid_responses),
+                    self.number_of_evaluation_nodes)
+        required = self.number_of_evaluation_nodes
+        # If not enough responses are received, apply penalty defaults.
+        if len(valid_responses) < required:
+            logger.error("Not enough valid responses received; applying penalty for missing responses.")
+            penalty = {"loss": 1e6, "mae": 1e6, "mse": 1e6, "rmse": 1e6, "r2": 1e6}
+            penalty_response = {"metrics": {"before_training": penalty, "after_training": penalty}}
+            for _ in range(required - len(valid_responses)):
+                valid_responses.append(penalty_response)
+            logger.info("Total responses after penalty: %d", len(valid_responses))
+
+        weights = {"loss": 0.4, "mae": 0.3, "mse": 0.1, "rmse": 0.1, "r2": -0.1}
+
+        def compute_weighted_score(metrics, weights):
+            score = sum(weights[metric] * metrics[metric] for metric in weights)
             return score
 
-        scores = [
-            min(
-                compute_weighted_score(response["metrics"]["before_training"], weights),
-                compute_weighted_score(response["metrics"]["after_training"], weights)
-            )
-            for response in responses
-        ]
-
-        return sum(scores) / len(responses)
+        scores = []
+        for resp in valid_responses:
+            try:
+                score_before = compute_weighted_score(resp["metrics"]["before_training"], weights)
+                score_after = compute_weighted_score(resp["metrics"]["after_training"], weights)
+                score = min(score_before, score_after)
+                scores.append(score)
+                logger.info("Computed score for response: before=%s, after=%s, chosen=%s", score_before, score_after,
+                            score)
+            except Exception as e:
+                logger.error("Error computing score for a response: %s", e)
+                scores.append(1e6)  # Penalty score
+        final_score = sum(scores) / len(scores)
+        logger.info("Final fitness score computed: %s", final_score)
+        return final_score
 
     def evolve(self):
-        """
-        Executes the genetic algorithm
-        """
+        logger.info("Starting evolution with population size: %d, generations: %d",
+                    self.population_size, self.number_of_generations)
         if not self.toolbox:
             raise ValueError("Toolbox is not set up. Call setup() before evolve().")
-
-        # initialize population if it's the first call to evolve
         if self.current_population is None:
             self.current_population = self.toolbox.population(n=self.population_size)
+            logger.info("Initialized population with %d individuals", len(self.current_population))
 
         best_individual = None
-        for generation in range(self.number_of_generation):
-            # evaluate the entire population
-            fitnesses = list(map(self.toolbox.evaluate, self.current_population))
+        for generation in range(self.number_of_generations):
+            logger.info("Generation %d: Starting evaluation of population.", generation)
+            invalid_ind = [ind for ind in self.current_population if not ind.fitness.valid or not ind.fitness.values]
+            for ind in invalid_ind:
+                try:
+                    fit = self.toolbox.evaluate(ind)
+                except Exception as eval_e:
+                    logger.error("Error evaluating individual %s: %s", ind, eval_e)
+                    fit = 1e6  # Penalty value
+                ind.fitness.values = (fit,)
 
-            for individual, fitness in zip(self.current_population, fitnesses):
-                individual.fitness.values = fitness
+            try:
+                best_individual = tools.selBest(self.current_population, 1)[0]
+                best_fitness = best_individual.fitness.values[0]
+            except Exception as sel_e:
+                logger.error("Generation %d: Error selecting best individual: %s", generation, sel_e)
+                break
 
-            # find the best individual
-            best_individual = tools.selBest(self.current_population, 1)[0]
-            best_fitness = best_individual.fitness.values[0]
+            logger.info("Generation %d: Best fitness after evaluation: %s", generation, best_fitness)
 
             if best_fitness < self.best_fitness:
                 self.best_fitness = best_fitness
@@ -240,32 +281,42 @@ class GeneticEngine:
             else:
                 self.stagnation_counter += 1
 
-            print(f"Generation {generation}: Best fitness = {best_fitness}")
-
+            logger.info("Generation %d: Stagnation counter = %d", generation, self.stagnation_counter)
             if self.stagnation_counter >= self.stagnation_limit:
-                print("Stagnation limit reached. Stopping early.")
+                logger.info("Generation %d: Stagnation limit reached. Stopping evolution.", generation)
                 break
 
-            # Apply genetic operators based on Boltzmann probability
+            # Apply genetic operators
             offspring = []
             cloud_temperature = self.get_cloud_temperature()
+            logger.info("Generation %d: Starting genetic operations with cloud_temperature = %s", generation,
+                        cloud_temperature)
             for individual in self.current_population:
-                if self.should_skip_update(individual.fitness.values[0], cloud_temperature):
-                    offspring.append(self.toolbox.clone(individual))
-                else:
-                    mutant = self.toolbox.clone(individual)
-                    if random.random() < 0.7:  # Crossover probability
-                        partner = random.choice(self.current_population)
-                        self.toolbox.mate(mutant, self.toolbox.clone(partner))
-                    if random.random() < 0.2:  # Mutation probability
-                        self.toolbox.mutate(mutant)
-                    del mutant.fitness.values  # Invalidate fitness
-                    offspring.append(mutant)
-
-            # Replace population with offspring
+                try:
+                    if self.should_skip_update(individual.fitness.values[0], cloud_temperature):
+                        offspring.append(self.toolbox.clone(individual))
+                        logger.info("Generation %d: Individual skipped update (cloned).", generation)
+                    else:
+                        mutant = self.toolbox.clone(individual)
+                        if random.random() < 0.7:  # Crossover probability
+                            partner = random.choice(self.current_population)
+                            self.toolbox.mate(mutant, self.toolbox.clone(partner))
+                            logger.info("Generation %d: Crossover performed.", generation)
+                        if random.random() < 0.2:  # Mutation probability
+                            self.toolbox.mutate(mutant)
+                            logger.info("Generation %d: Mutation performed.", generation)
+                        try:
+                            del mutant.fitness.values  # Invalidate fitness
+                        except Exception as e:
+                            logger.error("Generation %d: Error invalidating fitness: %s", generation, e)
+                        offspring.append(mutant)
+                except Exception as op_e:
+                    logger.error("Generation %d: Error processing individual genetic operator: %s", generation, op_e)
+            logger.info("Generation %d: Genetic operations complete. Offspring count = %d", generation, len(offspring))
             self.current_population[:] = offspring
+            logger.info("Generation %d: End of generation.", generation)
 
-        print(f"Evolution complete! Best individual: {best_individual} with fitness {self.best_fitness}")
+        logger.info("Evolution complete! Best individual: %s with fitness %s", best_individual, self.best_fitness)
 
     def get_top_k_individuals(self, k):
         """
@@ -280,9 +331,10 @@ class GeneticEngine:
             raise ValueError(f"Requested top {k} individuals, but the population size is {len(self.current_population)}"
                              f".")
 
-        # sort the population based on fitness in ascending order
-        sorted_population = sorted(self.current_population, key=lambda individual: individual.fitness.values[0])
-
+        for ind in self.current_population:
+            if not ind.fitness.values:
+                ind.fitness.values = (1e6,)
+        sorted_population = sorted(self.current_population, key=lambda ind: ind.fitness.values[0])
         return sorted_population[:k]
 
     def get_number_of_training_nodes(self):
