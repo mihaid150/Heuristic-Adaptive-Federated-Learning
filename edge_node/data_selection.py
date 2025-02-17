@@ -1,4 +1,5 @@
 import pandas as pd
+from shared.logging_config import logger
 
 
 def filter_data_by_interval_date(file_path: str, filtering_column_name: str, start_date: str, end_date: str,
@@ -33,7 +34,7 @@ def filter_data_by_interval_date(file_path: str, filtering_column_name: str, sta
         return output_file_path
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
         return None
 
 
@@ -70,5 +71,5 @@ def filter_data_by_day_date(file_path: str, filtering_column_name: str, day_date
         return output_file_path
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error(f"An error occurred: {e}")
         return None
