@@ -1,16 +1,20 @@
-import uvicorn
+# edge_node/edge_main.py
+from http.client import HTTPException
+
 from fastapi import APIRouter
 
-from shared_main import app
-from routing_paths import RoutingPaths
-from edge_service import EdgeService
+from edge_node.edge_service import EdgeService
 
-edge_router = APIRouter(
-    prefix=RoutingPaths.EDGE_ROUTE
-)
+edge_router = APIRouter()
 
-app.include_router(edge_router)
 
-if __name__ == "__main__":
-    EdgeService.init_process()
-    uvicorn.run(app, host="0.0.0.0", port=8083)
+@edge_router.post("/execute-model-evaluation")
+async def execute_model_evaluation_endpoint(message: dict):
+    """
+    HTTP endpoint to process a model training evaluation message.
+    The JSON request body should match the message format.
+    """
+    result = EdgeService.execute_model_training_evaluation_http(message)
+    if "error" in result:
+        raise HTTPException(status_code=400, detail=result["error"])
+    return result
