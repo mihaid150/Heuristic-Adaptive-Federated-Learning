@@ -1,6 +1,6 @@
 from typing import Optional
 
-from fed_node.fed_node import FedNode
+from shared.fed_node.fed_node import FedNode
 
 
 class NodeState:

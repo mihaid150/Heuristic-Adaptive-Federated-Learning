@@ -1,6 +1,7 @@
 import threading
 import time
 from typing import Callable, Any
+from shared.logging_config import logger
 
 
 class MonitoringThread(threading.Thread):
@@ -22,11 +23,11 @@ class MonitoringThread(threading.Thread):
 
     def run(self):
         # check the stop signal
-        print("Monitoring thread started.")
+        logger.info("Monitoring thread started.")
         while not self._stop_event.is_set():
             self.target(*self.args, **self.kwargs)  # call the target function
             time.sleep(self.delay)
-        print("Monitoring thread stopping...")
+        logger.info("Monitoring thread stopping...")
 
     def stop(self):
         """
