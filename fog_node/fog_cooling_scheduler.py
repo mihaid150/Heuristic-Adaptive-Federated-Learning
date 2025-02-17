@@ -1,10 +1,10 @@
 import math
 import threading
 import time
-
 from enum import Enum
-from fed_node.node_state import NodeState
-from monitoring_thread import MonitoringThread
+from shared.fed_node.node_state import NodeState
+from shared.monitoring_thread import MonitoringThread
+from shared.logging_config import logger
 from typing import Callable, Any
 
 
@@ -29,36 +29,46 @@ class FogCoolingScheduler:
         self.cooling_strategy = cooling_strategy
         self.stopping_score = 0
 
-        # for boltzmann cooling strategy
+        # For Boltzmann cooling strategy
         self.step = 1
+        self.boltzmann_coefficient = 0.001  # Controls the cooling rate for Boltzmann
 
-        # for exponential cooling strategy
-        self.exponential_coefficient = 0.95
+        # For exponential cooling strategy
+        self.exponential_coefficient = 0.999  # Reduced cooling rate
 
+        # Monitoring thread
         self.monitoring_thread = MonitoringThread(target=self.is_time_to_send_fog_model_to_cloud, sleep_time=1)
         self.send_fog_model_to_cloud = target
 
     def _cooling_process(self) -> None:
         """
-        The cooling process that runs periodically in a separate thread
+        The cooling process that runs periodically in a separate thread.
         """
+        counter = 0
         while self.is_cooling_operational:
             with self.lock:
                 if self.temperature > self.cooling_threshold:
                     if self.cooling_strategy == CoolingStrategy.BOLTZMANN:
-                        self.temperature /= math.log(self.step + 1)
+                        self.temperature -= self.boltzmann_coefficient * self.temperature / math.log(self.step + 2)
                     elif self.cooling_strategy == CoolingStrategy.EXPONENTIAL:
                         self.temperature *= self.exponential_coefficient
                     else:
                         raise ValueError("Invalid cooling strategy. Use 'boltzmann' or 'exponential'.")
 
-                    print(f"Cooling... Current temperature: {self.temperature:.4f}")
+                    # Ensure temperature never exceeds the initial value
+                    self.temperature = min(self.temperature, self.initial_temperature)
                     self.step += 1
                 else:
                     self.is_cooling_operational = False
-                    print("Cooling process has reached the cooldown threshold. Stopping...")
-            # fixed-rated scheduling (2 seconds)
-            time.sleep(2)
+                    logger.info("Cooling process has reached the cooldown threshold. Stopping...")
+
+            # Increase counter and log every 12 iterations (i.e., every 60 seconds)
+            counter += 1
+            if counter % 12 == 0:
+                logger.info(f"Cooling... Current temperature: {self.temperature:.4f}")
+
+            # Sleep for 5 seconds between iterations
+            time.sleep(5)
 
     def start_cooling(self):
         """
@@ -68,7 +78,7 @@ class FogCoolingScheduler:
             self.is_cooling_operational = True
             self.temperature = self.initial_temperature
             self.step = 1
-            print(f"Cooling process started with {self.cooling_strategy} strategy.")
+            logger.info(f"Cooling process started with {self.cooling_strategy} strategy.")
 
         self.cooling_thread = threading.Thread(target=self._cooling_process, daemon=True)
         self.cooling_thread.start()
@@ -83,19 +93,21 @@ class FogCoolingScheduler:
 
         if self.cooling_thread and self.cooling_thread.is_alive():
             self.cooling_thread.join()
-        print("Cooling process stopped.")
+        logger.info("Cooling process stopped.")
 
-    def is_cloud_cooling_operational(self) -> bool:
+    def is_fog_cooling_operational(self) -> bool:
         return self.is_cooling_operational
 
     def increment_stopping_score(self) -> None:
         self.stopping_score += 1
 
-    def has_reached_stopping_condition_for_cooler(self):
+    def has_reached_stopping_condition_for_cooler(self) -> bool:
         if self.stopping_score == sum(1 for node in NodeState.get_current_node().child_nodes if
                                       not node.is_evaluation_node):
             self.stop_cooling()
             self.stopping_score = 0
+            return True
+        return False
 
     def is_time_to_send_fog_model_to_cloud(self):
         if self.has_reached_stopping_condition_for_cooler() or not self.is_cooling_operational:
