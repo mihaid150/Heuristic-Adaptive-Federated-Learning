@@ -1,23 +1,59 @@
 import base64
 import json
 import os
-
+import time
 import threading
 import pika
-from fed_node.node_state import NodeState
-from model_manager import create_initial_lstm_model, aggregate_fog_models
-from cloud_resources_paths import CloudResourcesPaths
-from cloud_cooling_scheduler import CloudCoolingScheduler
+from pika.exceptions import AMQPConnectionError
+from shared.fed_node.node_state import NodeState
+from cloud_node.model_manager import create_initial_lstm_model, aggregate_fog_models
+from cloud_node.cloud_resources_paths import CloudResourcesPaths
+from cloud_node.cloud_cooling_scheduler import CloudCoolingScheduler
+from shared.utils import delete_all_files_in_folder
+from shared.monitoring_thread import MonitoringThread
+from shared.logging_config import logger
 
 
 class CloudService:
-
     CLOUD_RABBITMQ_HOST = "cloud-rabbitmq-host"
-    CLOUD_FOG_SEND_QUEUE = "cloud_to_fog_queue"
     FOG_CLOUD_RECEIVE_QUEUE = "fog_to_cloud_queue"
+    CLOUD_TO_FOG_SEND_EXCHANGE = "cloud_to_fog_exchange"
 
     cloud_cooling_scheduler = CloudCoolingScheduler()
     received_fog_messages = {}
+    rabbitmq_init_monitor_thread = None
+
+    @staticmethod
+    def monitor_current_node_init() -> None:
+        log_interval = 20  # seconds
+        last_log_time = 0
+        while True:  # Ensure the thread keeps running
+            try:
+                current_node = NodeState().get_current_node()
+                if current_node is not None:
+                    logger.info(f"Cloud node detected: {current_node.name}.")
+                    CloudService.CLOUD_RABBITMQ_HOST = current_node.ip_address
+                    CloudService.init_rabbitmq()
+                    if CloudService.rabbitmq_init_monitor_thread:
+                        CloudService.rabbitmq_init_monitor_thread.stop()
+                    break  # Exit the loop after successful initialization
+                else:
+                    now = time.time()
+                    if now - last_log_time >= log_interval:
+                        logger.info("No node detected yet. Retrying...")
+                        last_log_time = now
+            except Exception as e:
+                logger.error(f"Error in monitoring thread: {e}")
+            time.sleep(2)  # Sleep before the next check
+
+    @staticmethod
+    def start_monitoring_current_node() -> None:
+        logger.info("Starting monitoring thread for node initialization...")
+        CloudService.rabbitmq_init_monitor_thread = MonitoringThread(
+            target=CloudService.monitor_current_node_init,
+            sleep_time=2
+        )
+        CloudService.rabbitmq_init_monitor_thread.start()
 
     @staticmethod
     def init_rabbitmq():
@@ -28,8 +64,8 @@ class CloudService:
         channel = connection.channel()
 
         # declare the queues for sending and receiving messages
-        channel.queue_declare(queue=CloudService.CLOUD_FOG_SEND_QUEUE)
-        channel.queue_declare(queue=CloudService.FOG_CLOUD_RECEIVE_QUEUE)
+        channel.exchange_declare(exchange=CloudService.CLOUD_TO_FOG_SEND_EXCHANGE, exchange_type="direct", durable=True)
+        channel.queue_declare(queue=CloudService.FOG_CLOUD_RECEIVE_QUEUE, durable=True)
         connection.close()
 
     @staticmethod
@@ -47,7 +83,9 @@ class CloudService:
     @staticmethod
     def init_process(start_date: str, end_date: str, is_cache_active: bool, genetic_evaluation_strategy: str,
                      model_type: str):
-        CloudService.init_rabbitmq()
+
+        if CloudService.CLOUD_RABBITMQ_HOST == "cloud-rabbitmq-host":
+            raise ValueError("RabbitMQ host is not initialized. Please wait for the node to be detected.")
 
         # create the LSTM model
         cloud_model = create_initial_lstm_model()
@@ -82,13 +120,15 @@ class CloudService:
 
         # send the payload and the model to each child
         for child_node in cloud_node.child_nodes:
+            routing_key = str(child_node.id)
             message = {
                 "child_id": child_node.id,
                 **payload,
             }
 
-            channel.basic_publish(exchange="", routing_key=CloudService.CLOUD_FOG_SEND_QUEUE, body=str(message))
-            print(f"Request sent to queue for child {child_node.name} ({child_node.ip_address}:{child_node.port})")
+            channel.basic_publish(exchange=CloudService.CLOUD_TO_FOG_SEND_EXCHANGE, routing_key=routing_key,
+                                  body=json.dumps(message))
+            logger.info(f"Request sent to exchange for child {child_node.name} with routing key {routing_key}")
 
         # initialize the cloud cooling scheduler
         CloudService.cloud_cooling_scheduler.start_cooling()
@@ -106,7 +146,7 @@ class CloudService:
         """
         try:
             if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
-                print("Cooling process has finished. Ignoring further messages.")
+                logger.info("Cooling process has finished. Ignoring further messages.")
                 aggregate_fog_models(CloudService.received_fog_messages)
                 return
 
@@ -119,10 +159,10 @@ class CloudService:
                 CloudService.process_received_messages(message, child_id)
 
         except Exception as e:
-            print(f"Error processing message: {str(e)}")
+            logger.error(f"Error processing message: {str(e)}")
 
     @staticmethod
-    def process_received_messages(message: dict, child_id: int) -> None:
+    def process_received_messages(message: dict, child_id: str) -> None:
         fog_model_file_bytes = base64.b64decode(message["model_file"])
         lambda_prev_value = message.get("lambda_prev")
 
@@ -132,37 +172,63 @@ class CloudService:
         with open(fog_model_file_path, "wb") as fog_model_file:
             fog_model_file.write(fog_model_file_bytes)
 
-        print(f"Received message from fog {child_id}. The fog model was saved successfully.")
+        logger.info(f"Received message from fog {child_id}. The fog model was saved successfully.")
 
-        CloudService.received_fog_messages[child_id] = {"fog_model_file_path": fog_model_file_path,
-                                                        "lambda_prev": lambda_prev_value}
+        CloudService.received_fog_messages[child_id] = {
+            "fog_model_file_path": fog_model_file_path,
+            "lambda_prev": lambda_prev_value
+        }
 
+        # Once messages from all fogs are received, process them
         if len(CloudService.received_fog_messages) == len(NodeState.get_current_node().child_nodes):
-            print("Received messages from all fogs. Stopping the cooling process.")
+            logger.info("Received messages from all fogs. Processing received fog models:")
+            for fog_id, fog_info in CloudService.received_fog_messages.items():
+                logger.info(f"Processing fog model from {fog_id} located at {fog_info['fog_model_file_path']}")
+                # Here you can load the model file, read lambda_prev, etc.
+            logger.info("Stopping the cooling process.")
             CloudService.cloud_cooling_scheduler.stop_cooling()
             aggregate_fog_models(CloudService.received_fog_messages)
+            # Delete the received fog model files (keeping only the cloud model)
+            delete_all_files_in_folder(CloudResourcesPaths.MODELS_FOLDER_PATH, filter_string="fog")
 
     @staticmethod
     def listen_to_receive_fog_queue():
-        """
-        Start listening to the RabbitMQ queue for incoming messages.
-        This stops automatically when the cooling scheduler stops.
-        """
+        """Start listening to the RabbitMQ queue for incoming messages.
+        This stops automatically when the cooling scheduler stops."""
+        while True:
+            connection = None
+            try:
+                connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=CloudService.CLOUD_RABBITMQ_HOST,
+                        heartbeat=30
+                    )
+                )
+                channel = connection.channel()
 
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=CloudService.CLOUD_RABBITMQ_HOST))
-        channel = connection.channel()
+                def callback(ch, _method, _properties, body):
+                    CloudService.get_fog_model(body)
+                    # check if cooling has stopped
+                    if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
+                        logger.info("Stopping queue listener as cooling process is complete.")
+                        ch.stop_consuming()
 
-        def callback(ch, method, properties, body):
-            """
-            RabbitMQ callback to process messages
-            """
-            CloudService.get_fog_model(body)
-
-            # check if cooling has stopped
-            if not CloudService.cloud_cooling_scheduler.is_cooling_operational():
-                print("Stopping queue listener as cooling process is complete.")
-                channel.stop_consuming()
-
-        print("Listening for messages from fog nodes...")
-        channel.basic_consume(queue=CloudService.FOG_CLOUD_RECEIVE_QUEUE, on_message_callback=callback, auto_ack=True)
-        channel.start_consuming()
+                logger.info("Listening for messages from fog nodes...")
+                channel.basic_consume(
+                    queue=CloudService.FOG_CLOUD_RECEIVE_QUEUE,
+                    on_message_callback=callback,
+                    auto_ack=True
+                )
+                channel.start_consuming()
+            except (pika.exceptions.AMQPConnectionError, pika.exceptions.StreamLostError) as e:
+                logger.error(f"Connection error in listen_to_receive_fog_queue: {e}. Reconnecting in 5 seconds...")
+                time.sleep(5)
+            except Exception as e:
+                logger.error(f"Unexpected error in listen_to_receive_fog_queue: {e}. Reconnecting in 5 seconds...")
+                time.sleep(5)
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception as e:
+                        logger.error(f"An error occurred in listen_to_receive_fog_queue finally clause: {e}")
