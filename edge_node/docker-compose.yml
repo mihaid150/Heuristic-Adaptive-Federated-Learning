@@ -1,0 +1,16 @@
+version: "3.8"
+services:
+  edge_app:
+    image: edge_node_app:latest
+    container_name: edge_node_app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    network_mode: "host"
+
+networks:
+  edge_fog_net:
+    driver: bridge

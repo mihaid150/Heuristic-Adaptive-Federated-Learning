@@ -1,0 +1,27 @@
+version: "3.8"
+services:
+  cloud_app:
+    image: cloud_node_app:latest
+    container_name: cloud_node_app
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      - rabbitmq
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+    network_mode: "host"
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - "5672:5672"    # Messaging port
+      - "15672:15672"  # Management UI
+    networks:
+      - rabbitmq_net
+
+networks:
+  rabbitmq_net:
+    driver: bridge
