@@ -1,6 +1,7 @@
 import os
 import pandas as pd
 import numpy as np
+from shared.logging_config import logger
 
 
 def extract_date_features(dataframe):
@@ -29,11 +30,11 @@ def extract_time_features(dataframe):
 
 def add_rolling_features(dataframe, windows):
     for window in windows:
-        dataframe[f'{'value'}_rolling_mean_{window}'] = dataframe['value'].rolling(
+        dataframe[f'value_rolling_mean_{window}'] = dataframe['value'].rolling(
             window=window).mean().interpolate(method='linear').ffill().bfill()
-        dataframe[f'{'value'}_rolling_min_{window}'] = dataframe['value'].rolling(
+        dataframe[f'value_rolling_min_{window}'] = dataframe['value'].rolling(
             window=window).min().interpolate(method='linear').ffill().bfill()
-        dataframe[f'{'value'}_rolling_max_{window}'] = dataframe['value'].rolling(
+        dataframe[f'value_rolling_max_{window}'] = dataframe['value'].rolling(
             window=window).max().interpolate(method='linear').ffill().bfill()
     return dataframe
 
@@ -69,4 +70,4 @@ def preprocess_data(data_file_path, timedate_column_name, value_column_name):
 
     dataframe = dataframe[required_columns]
     dataframe.to_csv(data_file_path, index=False)
-    print(f"Updated file saved at: {data_file_path}")
+    logger.info(f"Updated file saved at: {data_file_path}")
