@@ -1,28 +1,36 @@
+# fog_node/fog_service.py
+
 import base64
 import json
 import os
 import random
 import threading
+import time
 import pika
-from fed_node.node_state import NodeState
-from fog_resources_paths import FogResourcesPaths
-from genetics.genetic_engine import GeneticEngine
-from fog_cooling_scheduler import FogCoolingScheduler
-from model_manager import execute_models_aggregation, read_lambda_prev
+from pika.exceptions import AMQPConnectionError
+from shared.fed_node.node_state import NodeState
+from fog_node.fog_resources_paths import FogResourcesPaths
+from fog_node.genetics.genetic_engine import GeneticEngine
+from fog_node.fog_cooling_scheduler import FogCoolingScheduler
+from fog_node.model_manager import execute_models_aggregation, read_lambda_prev
+from shared.monitoring_thread import MonitoringThread
+from shared.utils import delete_all_files_in_folder
+from shared.logging_config import logger
 
 
 class FogService:
-
     CLOUD_RABBITMQ_HOST = "cloud-rabbitmq-host"
-    CLOUD_FOG_RECEIVE_QUEUE = "cloud_to_fog_queue"
+    CLOUD_FOG_RECEIVE_EXCHANGE = "cloud_to_fog_exchange"
+    CLOUD_FOG_RECEIVE_QUEUE = "cloud_to_fog_"
     FOG_CLOUD_SEND_QUEUE = "fog_to_cloud_queue"
 
     FOG_RABBITMQ_HOST = "fog-rabbitmq-host"
-    FOG_EDGE_SEND_QUEUE = "fog_to_edge_queue"
+    FOG_EDGE_SEND_EXCHANGE = "fog_to_edge_exchange"
     EDGE_FOG_RECEIVE_QUEUE = "edge_to_fog_queue"
 
-    genetic_engine = GeneticEngine(5, 5, 2)
-    fog_cooling_scheduler = None
+    genetic_engine = GeneticEngine(4, 3, 2)
+    fog_cooling_scheduler: FogCoolingScheduler = None
+    process_init_monitor_thread = None
 
     @classmethod
     def get_fog_cooling_scheduler(cls):
@@ -31,15 +39,48 @@ class FogService:
         return cls.fog_cooling_scheduler
 
     @staticmethod
+    def monitor_parent_children_nodes_and_init_process() -> None:
+        """
+        Monitoring the parent and children nodes of the current fog node and initialize process when they are set.
+        """
+
+        current_node = NodeState.get_current_node()
+        if current_node and current_node.parent_node and current_node.child_nodes:
+            logger.info(f"Parent node detected: {current_node.parent_node}.")
+            FogService.CLOUD_RABBITMQ_HOST = current_node.parent_node.ip_address
+            FogService.FOG_RABBITMQ_HOST = current_node.ip_address
+            for child_node in current_node.child_nodes:
+                logger.info(f"Child node detected: {child_node}.")
+
+            FogService.init_process()
+            if FogService.process_init_monitor_thread:
+                FogService.process_init_monitor_thread.stop()
+
+    @staticmethod
+    def start_monitoring_parent_children_nodes() -> None:
+        """
+        Start monitoring thread to check for the parent node and children nodes and initialize the process then.
+        """
+        FogService.process_init_monitor_thread = MonitoringThread(
+            target=FogService.monitor_parent_children_nodes_and_init_process,
+            sleep_time=2
+        )
+        FogService.process_init_monitor_thread.start()
+
+    @staticmethod
     def init_process() -> None:
         FogService.init_rabbitmq()
-        FogService.genetic_engine.setup()
+        FogService.genetic_engine.setup(FogService.FOG_RABBITMQ_HOST, FogService.FOG_EDGE_SEND_EXCHANGE,
+                                        FogService.EDGE_FOG_RECEIVE_QUEUE)
         FogService.genetic_engine.set_number_of_evaluation_training_nodes(
             1,
             len(NodeState.get_current_node().child_nodes) - 1
         )
         listener_thread = threading.Thread(target=FogService.listen_to_cloud_receiving_queue, daemon=True)
         listener_thread.start()
+
+        edge_listener = threading.Thread(target=FogService.listen_to_edges_receiving_queue, daemon=True)
+        edge_listener.start()
 
     @staticmethod
     def init_rabbitmq() -> None:
@@ -49,17 +90,23 @@ class FogService:
         connection = pika.BlockingConnection(pika.ConnectionParameters(host=FogService.CLOUD_RABBITMQ_HOST))
         channel = connection.channel()
 
-        # declare the receiving queue for listening and sending messages from/to the cloud
-        channel.queue_declare(queue=FogService.CLOUD_FOG_RECEIVE_QUEUE)
-        channel.queue_declare(queue=FogService.FOG_CLOUD_SEND_QUEUE)
+        # declare the receiving exchange and queue for listening and sending messages from/to the cloud
+        channel.exchange_declare(exchange=FogService.CLOUD_FOG_RECEIVE_EXCHANGE, exchange_type="direct", durable=True)
+        fog_id = str(NodeState.get_current_node().id)
+        FogService.CLOUD_FOG_RECEIVE_QUEUE += str(fog_id)
+        channel.queue_declare(queue=FogService.CLOUD_FOG_RECEIVE_QUEUE, durable=True)
+        channel.queue_bind(queue=FogService.CLOUD_FOG_RECEIVE_QUEUE, exchange=FogService.CLOUD_FOG_RECEIVE_EXCHANGE,
+                           routing_key=fog_id)
+
+        channel.queue_declare(queue=FogService.FOG_CLOUD_SEND_QUEUE, durable=True)
         connection.close()
 
         connection = pika.BlockingConnection(pika.ConnectionParameters(host=FogService.FOG_RABBITMQ_HOST))
         channel = connection.channel()
 
-        # declare the receiving queue for listening and sending messages from/to the edge
-        channel.queue_declare(queue=FogService.FOG_EDGE_SEND_QUEUE)
-        channel.queue_declare(queue=FogService.EDGE_FOG_RECEIVE_QUEUE)
+        # declare the receiving exchange for listening and sending messages from/to the edge
+        channel.exchange_declare(exchange=FogService.FOG_EDGE_SEND_EXCHANGE, exchange_type="direct", durable=True)
+        channel.queue_declare(queue=FogService.EDGE_FOG_RECEIVE_QUEUE, durable=True)
         connection.close()
 
     @staticmethod
@@ -67,35 +114,50 @@ class FogService:
         """
         Start listening to the RabbitMQ queue for messages from the cloud node.
         """
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=FogService.CLOUD_RABBITMQ_HOST))
-        channel = connection.channel()
-
-        def callback(ch, method, properties, body):
-            """
-            RabbitMQ callback to process messages received from the cloud queue.
-            :param body: The actual message body.
-            """
-
+        while True:
+            connection = None
             try:
-                # deserialize the message
-                message = json.loads(body.decode("utf-8"))
-                child_id = message.get("child_id")
+                connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=FogService.CLOUD_RABBITMQ_HOST,
+                        heartbeat=30
+                    )
+                )
+                channel = connection.channel()
 
-                # check if the message is intended for this fog node
-                if child_id == NodeState.get_current_node().id:
-                    FogService.orchestrate_training(message)
-                    ch.basic_ack(delivery_tag=method.delivery_tag)  # ack rabbitmq to remove message only if processed
-                else:
-                    print(f"Ignoring message for child id {child_id}.")
-                    # no ack needed here, let other edges to handle it
+                def callback(ch, method, _properties, body):
+                    """
+                    RabbitMQ callback to process messages received from the cloud queue.
+                    """
+                    try:
+                        # Acknowledge the message immediately to remove it from the queue.
+                        ch.basic_ack(delivery_tag=method.delivery_tag)
+                        # Then process the message.
+                        message = json.loads(body.decode("utf-8"))
+                        child_id = message.get("child_id")
+                        logger.info(f"Processing message for child id {child_id}.")
+                        FogService.orchestrate_training(message)
+                    except Exception as e1:
+                        logger.error(f"Error processing message: {e1}")
+                        # in case of error we must negatively acknowledge the message and requeue it
+                        ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
+
+                channel.basic_consume(queue=FogService.CLOUD_FOG_RECEIVE_QUEUE, on_message_callback=callback,
+                                      auto_ack=False)
+                logger.info("Listening for messages from the cloud...")
+                channel.start_consuming()
+            except (pika.exceptions.AMQPConnectionError, pika.exceptions.StreamLostError) as e:
+                logger.error(f"Connection error in listen_to_cloud_receiving_queue: {e}. Reconnecting in 5 seconds...")
+                time.sleep(5)
             except Exception as e:
-                print(f"Error processing message: {str(e)}")
-                # in case of error we must negatively acknowledge the message and requeue it
-                ch.basic_nack(delivery_tag=method.delivery_tag, requeue=True)
-
-        channel.basic_consume(queue=FogService.CLOUD_FOG_RECEIVE_QUEUE, on_message_callback=callback, auto_ack=False)
-        print("Listening for messages from the cloud...")
-        channel.start_consuming()
+                logger.error(f"Unexpected error in listen_to_cloud_receiving_queue: {e}. Reconnecting in 5 seconds...")
+                time.sleep(5)
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception as e:
+                        logger.error(f"An error occurred in listen_to_cloud_receiving_queue finally clause: {e}")
 
     @staticmethod
     def orchestrate_training(message):
@@ -105,7 +167,7 @@ class FogService:
         """
         try:
             start_date = message.get("start_date")
-            current_date = message.get("current_date")
+            current_date = message.get("end_date")
             is_cache_active = message.get("is_cache_active")
             genetic_evaluation_strategy = message.get("genetic_evaluation_strategy")
             model_type = message.get("model_type")
@@ -125,11 +187,11 @@ class FogService:
             with open(fog_model_file_path, "wb") as model_file:
                 model_file.write(model_file_bytes)
 
-            print(f"Received cloud model saved at: {fog_model_file_path}")
+            logger.info(f"Received cloud model saved at: {fog_model_file_path}")
 
             # handle the received payload
-            print(f"Processing with start_date: {start_date}, current_date: {current_date}, cache_active: "
-                  f"{is_cache_active}, strategy: {genetic_evaluation_strategy}")
+            logger.info(f"Processing with start_date: {start_date}, current_date: {current_date}, cache_active: "
+                        f"{is_cache_active}, strategy: {genetic_evaluation_strategy}")
 
             # run the genetic engine
             evaluation_nodes_index = []
@@ -147,14 +209,14 @@ class FogService:
             FogService.genetic_engine.evolve()
 
             # get top individuals for each fog child
-            top_individuals = FogService.genetic_engine.get_top_k_individuals(
-                len(NodeState.get_current_node().child_nodes))
+            trainable_edges = [node for node in NodeState.get_current_node().child_nodes if not node.is_evaluation_node]
+            top_individuals = FogService.genetic_engine.get_top_k_individuals(len(trainable_edges))
 
             FogService.forward_model_to_edges(model_file_base64, start_date, current_date, is_cache_active,
                                               genetic_evaluation_strategy, model_type, top_individuals)
 
         except Exception as e:
-            print(f"Error processing the received message: {str(e)}")
+            logger.error(f"Error processing the received message: {str(e)}")
 
     @staticmethod
     def forward_model_to_edges(model_file_base64: str, start_date: str, current_date: str, is_cache_active: bool,
@@ -162,7 +224,12 @@ class FogService:
         """
         Forward the received model and payload to all child edge nodes.
         """
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=FogService.FOG_RABBITMQ_HOST))
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(
+                host=FogService.FOG_RABBITMQ_HOST,
+                heartbeat=30
+            )
+        )
         channel = connection.channel()
 
         current_node = NodeState.get_current_node()
@@ -181,47 +248,72 @@ class FogService:
                 "genetic_evaluation_strategy": genetic_evaluation_strategy,
                 "model_type": model_type,
                 "model_file": model_file_base64,
-                "learning_rate": individual[0],
+                "learning_rate": individual[0] / 10000.0,
                 "batch_size": individual[1],
                 "epochs": individual[2],
                 "patience": individual[3],
                 "fine_tune_layers": individual[4]
             }
 
-            channel.basic_publish(exchange="", routing_key=FogService.FOG_EDGE_SEND_QUEUE, body=json.dumps(message))
-            print(f"Forwarded model to edge {edge_node.name} ({edge_node.ip_address}:{edge_node.port})")
+            routing_key = str(edge_node.id)
+            channel.basic_publish(exchange=FogService.FOG_EDGE_SEND_EXCHANGE, routing_key=routing_key,
+                                  body=json.dumps(message))
+            logger.info(f"Forwarded model to edge {edge_node.name} ({edge_node.ip_address}:{edge_node.port})")
 
         connection.close()
-        FogService.fog_cooling_scheduler.start_cooling()
+        scheduler = FogService.get_fog_cooling_scheduler()
+        scheduler.start_cooling()
 
     @staticmethod
     def listen_to_edges_receiving_queue() -> None:
         """
         Start listening to RabbitMQ queue for messages from the edges node with the trained models.
         """
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=FogService.FOG_RABBITMQ_HOST))
-        channel = connection.channel()
+        while True:
+            connection = None
+            try:
+                connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=FogService.FOG_RABBITMQ_HOST,
+                        heartbeat=30
+                    )
+                )
 
-        def callback(ch, method, properties, body):
-            """
-            RabbitMQ callback to process messages received from the edges queue
-            """
-            FogService.fog_cooling_scheduler.increment_stopping_score()
-            FogService.get_edge_model(body)
-            FogService.fog_cooling_scheduler.has_reached_stopping_condition_for_cooler()
+                channel = connection.channel()
 
-            if not FogService.fog_cooling_scheduler.is_cooling_operational():
-                print("Stopping queue listener as cooling process is complete.")
-                channel.stop_consuming()
+                def callback(_ch, _method, _properties, body):
+                    """
+                    RabbitMQ callback to process messages received from the edges queue
+                    """
+                    FogService.fog_cooling_scheduler.increment_stopping_score()
+                    FogService.get_edge_model(body)
+                    FogService.fog_cooling_scheduler.has_reached_stopping_condition_for_cooler()
 
-        print("Listening for messages from edge nodes...")
-        channel.basic_consume(queue=FogService.EDGE_FOG_RECEIVE_QUEUE, on_message_callback=callback, auto_ack=True)
-        channel.start_consuming()
+                    if not FogService.fog_cooling_scheduler.is_fog_cooling_operational():
+                        logger.info("Stopping queue listener as cooling process is complete.")
+                        channel.stop_consuming()
+
+                logger.info("Listening for messages from edge nodes...")
+                channel.basic_consume(queue=FogService.EDGE_FOG_RECEIVE_QUEUE, on_message_callback=callback,
+                                      auto_ack=True)
+                channel.start_consuming()
+            except (pika.exceptions.AMQPConnectionError, pika.exceptions.StreamLostError) as e:
+                logger.error(f"Connection error in listen_to_edges_receiving_queue: {e}. Reconnecting in 5 seconds...")
+                time.sleep(5)
+            except Exception as e:
+                logger.error(f"Unexpected error in listen_to_edges_receiving_queue: {e}. Reconnecting in 5 seconds...")
+                time.sleep(5)
+            finally:
+                if connection is not None:
+                    try:
+                        connection.close()
+                    except Exception as e:
+                        logger.error(f"An error occurred in listen_to_edges_receiving_queue finally clause: {e}")
 
     @staticmethod
     def get_edge_model(body):
         try:
-            if not FogService.fog_cooling_scheduler.is_cooling_operational():
+            if not FogService.fog_cooling_scheduler.is_fog_cooling_operational():
                 return
             message = json.loads(body.decode('utf-8'))
             edge_model_file_bytes = base64.b64decode(message["model_file"])
@@ -234,12 +326,15 @@ class FogService:
             with open(edge_model_file_path, "wb") as edge_model_file:
                 edge_model_file.write(edge_model_file_bytes)
 
-            print(f"Received message from edge {edge_id}. Continuing with model aggregation.")
+            logger.info(f"Received message from edge {edge_id}. Continuing with model aggregation.")
 
             execute_models_aggregation(FogService.fog_cooling_scheduler, metrics)
 
         except Exception as e:
-            print(f"Error processing message: {str(e)}")
+            logger.error(f"Error processing message: {str(e)}")
+
+        # deleting the received edge model file keeping only the fog model
+        delete_all_files_in_folder(FogResourcesPaths.MODELS_FOLDER_PATH, filter_string="edge")
 
     @staticmethod
     def send_fog_model_to_cloud():
@@ -256,14 +351,18 @@ class FogService:
             "model_file": model_file_base64
         }
 
-        connection = pika.BlockingConnection(pika.ConnectionParameters(host=FogService.CLOUD_RABBITMQ_HOST))
+        connection = pika.BlockingConnection(
+            pika.ConnectionParameters(
+                host=FogService.CLOUD_RABBITMQ_HOST,
+                heartbeat=30
+            )
+        )
         channel = connection.channel()
         channel.basic_publish(exchange="", routing_key=FogService.FOG_CLOUD_SEND_QUEUE, body=json.dumps(message))
         connection.close()
 
-        print("Fog has send fog model to cloud node.")
+        logger.info("Fog has send fog model to cloud node.")
 
         # restart the evaluation/training node assigment
         for node in NodeState.get_current_node().child_nodes:
             node.is_evaluation_node = False
-
