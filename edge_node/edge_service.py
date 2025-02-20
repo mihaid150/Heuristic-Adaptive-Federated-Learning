@@ -21,7 +21,7 @@ class EdgeService:
     FOG_EDGE_RECEIVE_EXCHANGE = "fog_to_edge_exchange"
     EDGE_FOG_SEND_QUEUE = "edge_to_fog_queue"
     rabbitmq_init_monitor_thread = None
-    listener_thread = None
+    fog_listener_thread = None
     _publisher_loop = None
 
     @staticmethod
@@ -55,12 +55,12 @@ class EdgeService:
             if EdgeService.rabbitmq_init_monitor_thread:
                 EdgeService.rabbitmq_init_monitor_thread.stop()
             # Start the listener thread if not running
-            if not EdgeService.listener_thread or not EdgeService.listener_thread.is_alive():
-                EdgeService.listener_thread = threading.Thread(
+            if not EdgeService.fog_listener_thread or not EdgeService.fog_listener_thread.is_alive():
+                EdgeService.fog_listener_thread = threading.Thread(
                     target=EdgeService.listen_to_fog_receiving_queue,
                     daemon=True
                 )
-                EdgeService.listener_thread.start()
+                EdgeService.fog_listener_thread.start()
 
     @staticmethod
     def start_monitoring_parent_node() -> None:
