@@ -87,3 +87,14 @@ class CloudCoolingScheduler:
 
     def is_cloud_cooling_operational(self) -> bool:
         return self.is_cooling_operational
+
+    def reset(self):
+        """
+        Reset the scheduler’s internal thread state so that a new cooling cycle can be started.
+        """
+        with self.lock:
+            self.cooling_thread = None
+            self.is_cooling_operational = False
+            self.temperature = self.initial_temperature
+            self.step = 1
+        logger.info("CloudCoolingScheduler has been reset.")

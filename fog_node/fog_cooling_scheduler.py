@@ -26,6 +26,7 @@ class FogCoolingScheduler:
         self.is_cooling_operational = False
         self.lock = threading.Lock()
         self.cooling_thread = None
+        self.monitoring_thread = None
         self.cooling_strategy = cooling_strategy
         self.stopping_score = 0
 
@@ -36,8 +37,6 @@ class FogCoolingScheduler:
         # For exponential cooling strategy
         self.exponential_coefficient = 0.999  # Reduced cooling rate
 
-        # Monitoring thread
-        self.monitoring_thread = MonitoringThread(target=self.is_time_to_send_fog_model_to_cloud, sleep_time=1)
         self.send_fog_model_to_cloud = target
 
     def _cooling_process(self) -> None:
@@ -82,6 +81,7 @@ class FogCoolingScheduler:
 
         self.cooling_thread = threading.Thread(target=self._cooling_process, daemon=True)
         self.cooling_thread.start()
+        self.monitoring_thread = MonitoringThread(target=self.is_time_to_send_fog_model_to_cloud, sleep_time=1)
         self.monitoring_thread.start()
 
     def stop_cooling(self):
@@ -113,3 +113,19 @@ class FogCoolingScheduler:
         if self.has_reached_stopping_condition_for_cooler() or not self.is_cooling_operational:
             self.send_fog_model_to_cloud()
             self.monitoring_thread.stop()
+
+    def reset(self):
+        """
+        Reset the scheduler's internal state so that a new cooling cycle can be started.
+        """
+        with self.lock:
+            self.is_cooling_operational = False
+            self.temperature = self.initial_temperature
+            self.step = 1
+            self.stopping_score = 0
+            # Reset the monitoring thread by creating a new instance.
+            self.monitoring_thread = MonitoringThread(
+                target=self.is_time_to_send_fog_model_to_cloud,
+                sleep_time=1
+            )
+        logger.info("FogCoolingScheduler has been reset.")
