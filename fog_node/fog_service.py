@@ -28,7 +28,7 @@ class FogService:
     FOG_EDGE_SEND_EXCHANGE = "fog_to_edge_exchange"
     EDGE_FOG_RECEIVE_QUEUE = "edge_to_fog_queue"
 
-    genetic_engine = GeneticEngine(4, 3, 2)
+    genetic_engine = GeneticEngine(3, 2, 2)
     fog_cooling_scheduler: FogCoolingScheduler = None
     process_init_monitor_thread = None
 
@@ -76,8 +76,8 @@ class FogService:
             1,
             len(NodeState.get_current_node().child_nodes) - 1
         )
-        listener_thread = threading.Thread(target=FogService.listen_to_cloud_receiving_queue, daemon=True)
-        listener_thread.start()
+        cloud_listener = threading.Thread(target=FogService.listen_to_cloud_receiving_queue, daemon=True)
+        cloud_listener.start()
 
         edge_listener = threading.Thread(target=FogService.listen_to_edges_receiving_queue, daemon=True)
         edge_listener.start()
@@ -136,6 +136,12 @@ class FogService:
                         message = json.loads(body.decode("utf-8"))
                         child_id = message.get("child_id")
                         logger.info(f"Processing message for child id {child_id}.")
+
+                        scheduler = FogService.get_fog_cooling_scheduler()
+                        if scheduler is not None:
+                            scheduler.reset()
+                        else:
+                            logger.error("Fog cooling scheduler is not initialized.")
                         FogService.orchestrate_training(message)
                     except Exception as e1:
                         logger.error(f"Error processing message: {e1}")
@@ -214,6 +220,8 @@ class FogService:
 
             FogService.forward_model_to_edges(model_file_base64, start_date, current_date, is_cache_active,
                                               genetic_evaluation_strategy, model_type, top_individuals)
+
+            FogService.genetic_engine.save_population_to_json()
 
         except Exception as e:
             logger.error(f"Error processing the received message: {str(e)}")
@@ -338,9 +346,10 @@ class FogService:
 
     @staticmethod
     def send_fog_model_to_cloud():
+        logger.info("Running the sending of the fog model to cloud.")
+
         fog_model_file_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH,
                                            FogResourcesPaths.FOG_MODEL_FILE_NAME)
-
         with open(fog_model_file_path, "rb") as model_file:
             model_bytes = model_file.read()
             model_file_base64 = base64.b64encode(model_bytes).decode("utf-8")
@@ -351,18 +360,27 @@ class FogService:
             "model_file": model_file_base64
         }
 
-        connection = pika.BlockingConnection(
-            pika.ConnectionParameters(
-                host=FogService.CLOUD_RABBITMQ_HOST,
-                heartbeat=30
-            )
-        )
-        channel = connection.channel()
-        channel.basic_publish(exchange="", routing_key=FogService.FOG_CLOUD_SEND_QUEUE, body=json.dumps(message))
-        connection.close()
+        published = False
+        while not published:
+            try:
+                connection = pika.BlockingConnection(
+                    pika.ConnectionParameters(
+                        host=FogService.CLOUD_RABBITMQ_HOST,
+                        heartbeat=30
+                    )
+                )
+                channel = connection.channel()
+                channel.basic_publish(exchange="",
+                                      routing_key=FogService.FOG_CLOUD_SEND_QUEUE,
+                                      body=json.dumps(message))
+                connection.close()
+                published = True
+                logger.info("Fog has sent fog model to cloud node.")
+            except Exception as e:
+                logger.error(f"Error sending fog model to cloud: {e}. Retrying in 5 seconds...")
+                time.sleep(5)
 
-        logger.info("Fog has send fog model to cloud node.")
-
-        # restart the evaluation/training node assigment
+        # Restart the evaluation/training node assignment
         for node in NodeState.get_current_node().child_nodes:
             node.is_evaluation_node = False
+
