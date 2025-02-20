@@ -5,6 +5,7 @@ WORKDIR /app
 COPY cloud_node/requirements.txt /app/cloud_node/
 
 RUN mkdir "/app/models"
+RUN mkdir "/app/cache"
 
 RUN apt-get update && apt-get install -y \
     build-essential \

@@ -5,6 +5,7 @@ WORKDIR /app
 RUN mkdir "/app/models"
 RUN mkdir "/app/data"
 RUN mkdir "/app/data/filtered_data"
+RUN mkdir "/app/cache"
 
 COPY edge_node/requirements.txt /app/edge_node/
 

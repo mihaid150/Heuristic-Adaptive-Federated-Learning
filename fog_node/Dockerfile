@@ -3,6 +3,7 @@ FROM python:3.10-slim
 WORKDIR /app
 
 RUN mkdir "/app/models"
+RUN mkdir "/app/cache"
 
 COPY fog_node/requirements.txt /app/fog_node/
 
