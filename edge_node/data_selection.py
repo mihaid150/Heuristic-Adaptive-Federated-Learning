@@ -41,11 +41,12 @@ def filter_data_by_interval_date(file_path: str, filtering_column_name: str, sta
 def filter_data_by_day_date(file_path: str, filtering_column_name: str, day_date: str,
                             output_file_path: str):
     """
-    Filters data from a CSV file based on a specific day and the following day and saves the filtered data.
+    Filters data from a CSV file for a specific day and saves the filtered data.
+    This function will return only the entries for the given day (e.g., 48 half‑hourly records).
 
     :param file_path: Path to the input CSV file.
     :param filtering_column_name: Column name containing date values for filtering.
-    :param day_date: The specific date for filtering (inclusive) and the next day.
+    :param day_date: The specific date for filtering (e.g., "2018-04-21").
     :param output_file_path: Path to save the filtered CSV file.
     :return: Path to the saved filtered CSV file.
     """
@@ -53,20 +54,22 @@ def filter_data_by_day_date(file_path: str, filtering_column_name: str, day_date
     is_first_chunk = True  # flag to handle headers for the output file
 
     try:
-        # parse the provided day_date
-        day_date = pd.to_datetime(day_date)
+        # Parse the provided day_date and compute the end of the day.
+        start = pd.to_datetime(day_date)
+        end = start + pd.Timedelta(days=1)  # only include the given day
 
         for chunk in pd.read_csv(file_path, chunksize=chunk_size):
-            # convert the filtering column to datetime, ignoring errors
+            # Convert the filtering column to datetime, ignoring errors
             chunk[filtering_column_name] = pd.to_datetime(chunk[filtering_column_name], errors='coerce')
 
-            # filter the chunk based on the date range
-            filtered_chunk = chunk[(chunk[filtering_column_name] == day_date)]
+            # Filter the chunk: all rows with a timestamp >= start and < end
+            filtered_chunk = chunk[(chunk[filtering_column_name] >= start) &
+                                   (chunk[filtering_column_name] < end)]
 
-            # if the filtered chunk is not empty, append it to the output file
+            # If the filtered chunk is not empty, append it to the output file
             if not filtered_chunk.empty:
                 filtered_chunk.to_csv(output_file_path, mode='a', index=False, header=is_first_chunk)
-                is_first_chunk = False  # ensure headers are written only for the first chunk
+                is_first_chunk = False  # ensure headers are written only once
 
         return output_file_path
 
