@@ -13,50 +13,79 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 
-def create_initial_lstm_model():
+def create_initial_lstm_model(sequence_length=60, num_features=5):
     """
-    Create and compile an initial LSTM model with a specified number of features and sequence length.
+    Create and compile an enhanced LSTM model for time series forecasting.
+
+    The model includes:
+      - A 1D convolution layer to capture local temporal patterns.
+      - Batch normalization and dropout for regularization.
+      - Two LSTM layers with tanh activations.
+      - Dense layers to learn non-linear relationships.
+
+    Parameters:
+        sequence_length (int): The length of the input sequences.
+        num_features (int): The number of features per timestep.
 
     Returns:
-    tf.keras.Model: Compiled LSTM model.
+        tf.keras.Model: A compiled LSTM model.
     """
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(48, 5), dtype=tf.float32),
-        tf.keras.layers.LSTM(32, activation='relu', return_sequences=True),
-        tf.keras.layers.LSTM(64, activation='relu'),
-        tf.keras.layers.Dense(16, activation='relu'),
-        tf.keras.layers.Dense(1),
-    ])
-    model.compile(optimizer='adam', loss='mse')
+    inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
+
+    # Convolutional block to capture local patterns
+    x = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')(inputs)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+
+    # LSTM layers for sequential modeling
+    x = tf.keras.layers.LSTM(64, activation='tanh', return_sequences=True)(x)
+    x = tf.keras.layers.LSTM(128, activation='tanh')(x)
+
+    # Dense layers for non-linear transformations
+    x = tf.keras.layers.Dense(64, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+    outputs = tf.keras.layers.Dense(1)(x)
+
+    model = tf.keras.Model(inputs, outputs)
+    optimizer = tf.keras.optimizers.Adam()
+    model.compile(optimizer=optimizer, loss='mse', metrics=["mae", "mse"])
+
+    logger.info(f"Created model with input shape ({sequence_length}, {num_features})")
     return model
 
 
-def create_sequences(data, sequence_length=48):
+def create_sequences(data, sequence_length=60):
     """
     Convert a 2D array (n_samples, features) into a 3D array of sequences.
-    Each sequence is a sliding window of length sequence_length.
+    Each sequence is a sliding window of fixed length.
 
-    :param data: 2D NumPy array of shape (n_samples, features)
-    :param sequence_length: Length of each sequence
-    :return: 3D NumPy array of shape (n_samples - sequence_length + 1, sequence_length, features)
+    Parameters:
+        data (np.array): 2D array of shape (n_samples, features).
+        sequence_length (int): The length of each sequence.
+
+    Returns:
+        np.array: 3D array of shape (n_samples - sequence_length + 1, sequence_length, features)
     """
-    sequences = []
-    for i in range(len(data) - sequence_length + 1):
-        sequences.append(data[i:i + sequence_length])
-    return np.array(sequences)
+    num_sequences = len(data) - sequence_length + 1
+    sequences = [data[i:i + sequence_length] for i in range(num_sequences)]
+    sequences = np.array(sequences)
+    logger.info(f"Created {sequences.shape[0]} sequences of length {sequence_length} with {data.shape[1]} features")
+    return sequences
 
 
 def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: str, learning_rate: float,
-                        batch_size: int, epochs: int, patience: int, fine_tune_layers: int):
+                        batch_size: int, epochs: int, patience: int, fine_tune_layers: int, sequence_length=60):
     """
     Pretrain the model on data from a given period and evaluate on the same period.
     Save evaluation metrics before and after training.
     """
     # Load and filter the data for the specified period
-    filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "DateTime", start_date, end_date,
+    filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", start_date, end_date,
                                  EdgeResourcesPaths.FILTERED_DATA_PATH)
-    preprocess_data(EdgeResourcesPaths.FILTERED_DATA_PATH, "DateTime", "KWH/hh (per half hour)")
+    preprocess_data(EdgeResourcesPaths.FILTERED_DATA_PATH, "datetime", "apparent power (kWh)")
     data = pd.read_csv(EdgeResourcesPaths.FILTERED_DATA_PATH)
+
+    logger.info(f"Filtered data shape: {data.shape}")
 
     # Extract features and target
     X = data[[
@@ -65,16 +94,20 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
     ]].values
     y = data["value"].values
 
-    # Convert the 2D feature array into sequences of length 48.
-    # The resulting X_seq will have shape (n_samples - 48 + 1, 48, 5).
-    X_seq = create_sequences(X, sequence_length=48)
-    # For each sequence, take the target as the last value of the window.
-    y_seq = y[48 - 1:]
+    logger.info(f"Features shape: {X.shape}, target length: {len(y)}")
+
+    # Create sequences and corresponding targets
+    num_sequences = len(X) - sequence_length + 1
+    X_seq = create_sequences(X, sequence_length=sequence_length)
+    y_seq = y[sequence_length - 1: sequence_length - 1 + num_sequences]
+    logger.info(f"Created sequences: X_seq shape: {X_seq.shape}, y_seq shape: {y_seq.shape}")
 
     # Split data into training and validation sets (keeping time order)
     split_index = int(len(X_seq) * 0.8)
     train_X, val_X = X_seq[:split_index], X_seq[split_index:]
     train_y, val_y = y_seq[:split_index], y_seq[split_index:]
+
+    logger.info(f"Training set: {train_X.shape}, Validation set: {val_X.shape}")
 
     # Load the model
     custom_objects = {"mse": tf.keras.losses.MeanSquaredError()}
@@ -98,8 +131,8 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
             "rmse": np.sqrt(mean_squared_error(val_y, predictions_before)),
             "r2": r2_score(val_y, predictions_before)
         })
-    except Exception:
-        logger.error("Evaluation before training failed, possibly due to untrained model.")
+    except Exception as e:
+        logger.error(f"Evaluation before training failed, possibly due to untrained model: {e}")
 
     # Fine-tune the model (freeze all but the last fine_tune_layers)
     for layer in model.layers[:-fine_tune_layers]:
@@ -112,7 +145,7 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
     # Train the model
     logger.info("Training the model...")
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
-    history = model.fit(
+    model.fit(
         train_X, train_y,
         validation_data=(val_X, val_y),
         batch_size=batch_size,
@@ -131,6 +164,7 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
         "rmse": np.sqrt(mean_squared_error(val_y, predictions_after)),
         "r2": r2_score(val_y, predictions_after)
     }
+    logger.info(f"Evaluation after training: {evaluation_after}")
 
     # Save metrics to a JSON file (or return them)
     metrics = {
@@ -148,7 +182,7 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
 
 
 def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: float,
-                       batch_size: int, epochs: int, patience: int, fine_tune_layers: int):
+                       batch_size: int, epochs: int, patience: int, fine_tune_layers: int, sequence_length=60):
     """
     Retrain the model on the current day's data and evaluate on the next day's data.
     """
@@ -157,16 +191,18 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
     next_day_data_path = EdgeResourcesPaths.NEXT_DAY_DATA_PATH
 
     # Process current day's data
-    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "DateTime", date, current_day_data_path)
-    preprocess_data(current_day_data_path, "DateTime", "KWH/hh (per half hour)")
+    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", date, current_day_data_path)
+    preprocess_data(current_day_data_path, "datetime", "apparent power (kWh)")
 
     next_day = pd.to_datetime(date) + pd.Timedelta(days=1)
-    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "DateTime",
+    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
                             next_day.strftime("%Y-%m-%d"), next_day_data_path)
-    preprocess_data(next_day_data_path, "DateTime", "KWH/hh (per half hour)")
+    preprocess_data(next_day_data_path, "datetime", "apparent power (kWh)")
 
     train_data = pd.read_csv(current_day_data_path)
     eval_data = pd.read_csv(next_day_data_path)
+
+    logger.info(f"Training data shape: {train_data.shape}, Evaluation data shape: {eval_data.shape}")
 
     # Prepare input and target data
     X_train = train_data[[
@@ -181,11 +217,17 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
     ]].values
     y_eval = eval_data["value"].values
 
-    # Convert to sequences for both training and evaluation sets
-    X_train_seq = create_sequences(X_train, sequence_length=48)
-    y_train_seq = y_train[48 - 1:]
-    X_eval_seq = create_sequences(X_eval, sequence_length=48)
-    y_eval_seq = y_eval[48 - 1:]
+    # Create sequences for both training and evaluation sets
+    num_train_seq = len(X_train) - sequence_length + 1
+    X_train_seq = create_sequences(X_train, sequence_length=sequence_length)
+    y_train_seq = y_train[sequence_length - 1: sequence_length - 1 + num_train_seq]
+
+    num_eval_seq = len(X_eval) - sequence_length + 1
+    X_eval_seq = create_sequences(X_eval, sequence_length=sequence_length)
+    y_eval_seq = y_eval[sequence_length - 1: sequence_length - 1 + num_eval_seq]
+
+    logger.info(f"Training sequences: X_train_seq shape: {X_train_seq.shape}, y_train_seq shape: {y_train_seq.shape}")
+    logger.info(f"Evaluation sequences: X_eval_seq shape: {X_eval_seq.shape}, y_eval_seq shape: {y_eval_seq.shape}")
 
     # Load the model
     custom_objects = {"mse": tf.keras.losses.MeanSquaredError()}
@@ -205,6 +247,8 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
         "r2": r2_before
     }
 
+    logger.info(f"Metrics before retraining: {metrics_before}")
+
     # Fine-tune the model (freeze all but the last fine_tune_layers)
     for layer in model.layers[:-fine_tune_layers]:
         layer.trainable = False
@@ -216,7 +260,7 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
     # Retrain the model
     logger.info("Retraining the model...")
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, restore_best_weights=True)
-    history = model.fit(
+    model.fit(
         X_train_seq, y_train_seq,
         batch_size=batch_size,
         epochs=epochs,
@@ -237,6 +281,7 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
         "rmse": rmse_after,
         "r2": r2_after
     }
+    logger.info(f"Metrics after retraining: {metrics_after}")
 
     metrics = {
         "before_training": metrics_before,
