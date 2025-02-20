@@ -6,6 +6,7 @@ import threading
 import pika
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
+from shared.shared_resources_paths import SharedResourcesPaths
 from cloud_node.model_manager import create_initial_lstm_model, aggregate_fog_models
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
 from cloud_node.cloud_cooling_scheduler import CloudCoolingScheduler
@@ -22,6 +23,7 @@ class CloudService:
     cloud_cooling_scheduler = CloudCoolingScheduler()
     received_fog_messages = {}
     rabbitmq_init_monitor_thread = None
+    fog_models_listener_thread = None
 
     @staticmethod
     def monitor_current_node_init() -> None:
@@ -45,6 +47,21 @@ class CloudService:
             except Exception as e:
                 logger.error(f"Error in monitoring thread: {e}")
             time.sleep(2)  # Sleep before the next check
+
+    @staticmethod
+    def stop_fog_models_listener():
+        """
+        Stop the current fog models listener thread if it is running.
+        """
+        if CloudService.fog_models_listener_thread is not None and CloudService.fog_models_listener_thread.is_alive():
+            logger.info("Stopping current fog models listener thread...")
+            # We assume that the listener thread exits when the cooling process stops.
+            # Here we force-stop by joining with a timeout.
+            try:
+                CloudService.fog_models_listener_thread.join(timeout=5)
+            except Exception as e:
+                logger.error(f"Error while stopping fog models listener thread: {e}")
+            CloudService.fog_models_listener_thread = None
 
     @staticmethod
     def start_monitoring_current_node() -> None:
@@ -81,26 +98,50 @@ class CloudService:
         }
 
     @staticmethod
-    def init_process(start_date: str, end_date: str, is_cache_active: bool, genetic_evaluation_strategy: str,
-                     model_type: str):
+    def start_listener():
+        # only start if there's no listener thread running or if it's not alive.
+        CloudService.stop_fog_models_listener()
+        if CloudService.fog_models_listener_thread is None or not CloudService.fog_models_listener_thread.is_alive():
+            CloudService.fog_models_listener_thread = threading.Thread(
+                target=CloudService.listen_to_receive_fog_queue,
+                daemon=True
+            )
+            CloudService.fog_models_listener_thread.start()
+            logger.info("Started fog_models_listener thread for fog messages.")
+        else:
+            logger.info("fog_models_listener thread already running; not starting another.")
+
+    @staticmethod
+    def execute_training_process(start_date: str | None, end_date: str, is_cache_active: bool,
+                                 genetic_evaluation_strategy: str,
+                                 model_type: str):
+        CloudService.cloud_cooling_scheduler.reset()
+        CloudService.received_fog_messages = {}
 
         if CloudService.CLOUD_RABBITMQ_HOST == "cloud-rabbitmq-host":
             raise ValueError("RabbitMQ host is not initialized. Please wait for the node to be detected.")
 
-        # create the LSTM model
-        cloud_model = create_initial_lstm_model()
-
-        # save the model locally
         cloud_model_file_path = os.path.join(CloudResourcesPaths.MODELS_FOLDER_PATH,
                                              CloudResourcesPaths.CLOUD_MODEL_FILE_NAME)
-        cloud_model.save(cloud_model_file_path)
 
-        # read the saved file in bytes format
-        with open(cloud_model_file_path, "rb") as model_file:
-            model_bytes = model_file.read()
-            encoded_model = base64.b64encode(model_bytes).decode('utf-8')
+        cache_cloud_model_file_path = os.path.join(SharedResourcesPaths.CACHE_FOLDER_PATH,
+                                                   CloudResourcesPaths.CLOUD_MODEL_FILE_NAME)
 
-        # prepare the payload
+        if start_date is not None:
+            cloud_model = create_initial_lstm_model()
+            cloud_model.save(cloud_model_file_path)
+
+        if os.path.exists(cloud_model_file_path):
+            logger.info("Cloud model exists in the model folder.")
+            with open(cloud_model_file_path, "rb") as model_file:
+                model_bytes = model_file.read()
+                encoded_model = base64.b64encode(model_bytes).decode('utf-8')
+        else:
+            logger.info("Cloud model does not exists in the model folder, loading it from cache.")
+            with open(cache_cloud_model_file_path, "rb") as model_file:
+                model_bytes = model_file.read()
+                encoded_model = base64.b64encode(model_bytes).decode('utf-8')
+
         payload = {
             "start_date": start_date,
             "end_date": end_date,
@@ -110,15 +151,23 @@ class CloudService:
             "model_file": encoded_model
         }
 
-        # get the current cloud node
+        CloudService.cloud_cooling_scheduler.start_cooling()
+        CloudService.start_listener()
+        CloudService._send_message_to_children(payload)
+
+    @staticmethod
+    def _send_message_to_children(payload):
+        """Sends a message to all child nodes."""
+
         cloud_node = NodeState.get_current_node()
         if not cloud_node:
-            raise ValueError("Current not is not initialized. Go back and initialized it first.")
+            raise ValueError("Current node is not initialized. Go back and initialize it first.")
 
         connection = pika.BlockingConnection(pika.ConnectionParameters(host=CloudService.CLOUD_RABBITMQ_HOST))
         channel = connection.channel()
 
-        # send the payload and the model to each child
+        logger.info(f"Sending the cloud model to {len(cloud_node.child_nodes)} fog nodes.")
+
         for child_node in cloud_node.child_nodes:
             routing_key = str(child_node.id)
             message = {
@@ -129,12 +178,6 @@ class CloudService:
             channel.basic_publish(exchange=CloudService.CLOUD_TO_FOG_SEND_EXCHANGE, routing_key=routing_key,
                                   body=json.dumps(message))
             logger.info(f"Request sent to exchange for child {child_node.name} with routing key {routing_key}")
-
-        # initialize the cloud cooling scheduler
-        CloudService.cloud_cooling_scheduler.start_cooling()
-
-        listener_thread = threading.Thread(target=CloudService.listen_to_receive_fog_queue, daemon=True)
-        listener_thread.start()
 
         connection.close()
 
