@@ -7,6 +7,7 @@ import tensorflow as tf
 from keras.src.losses import MeanSquaredError
 
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
+from shared.shared_resources_paths import SharedResourcesPaths
 from shared.logging_config import logger
 
 
@@ -14,21 +15,44 @@ from shared.logging_config import logger
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 
-def create_initial_lstm_model():
+def create_initial_lstm_model(sequence_length=60, num_features=5):
     """
-    Create and compile an initial LSTM model with a specified number of features and sequence length.
+    Create and compile an enhanced LSTM model for time series forecasting.
+
+    The model includes:
+      - A 1D convolution layer to capture local temporal patterns.
+      - Batch normalization and dropout for regularization.
+      - Two LSTM layers with tanh activations.
+      - Dense layers to learn non-linear relationships.
+
+    Parameters:
+        sequence_length (int): The length of the input sequences.
+        num_features (int): The number of features per timestep.
 
     Returns:
-    tf.keras.Model: Compiled LSTM model.
+        tf.keras.Model: A compiled LSTM model.
     """
-    model = tf.keras.Sequential([
-        tf.keras.layers.Input(shape=(48, 5), dtype=tf.float32),
-        tf.keras.layers.LSTM(32, activation='relu', return_sequences=True),
-        tf.keras.layers.LSTM(64, activation='relu'),
-        tf.keras.layers.Dense(16, activation='relu'),
-        tf.keras.layers.Dense(1),
-    ])
-    model.compile(optimizer='adam', loss='mse')
+    inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
+
+    # Convolutional block to capture local patterns
+    x = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')(inputs)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+
+    # LSTM layers for sequential modeling
+    x = tf.keras.layers.LSTM(64, activation='tanh', return_sequences=True)(x)
+    x = tf.keras.layers.LSTM(128, activation='tanh')(x)
+
+    # Dense layers for non-linear transformations
+    x = tf.keras.layers.Dense(64, activation='relu')(x)
+    x = tf.keras.layers.Dropout(0.2)(x)
+    outputs = tf.keras.layers.Dense(1)(x)
+
+    model = tf.keras.Model(inputs, outputs)
+    optimizer = tf.keras.optimizers.Adam()
+    model.compile(optimizer=optimizer, loss='mse', metrics=["mae", "mse"])
+
+    logger.info(f"Created model with input shape ({sequence_length}, {num_features})")
     return model
 
 
@@ -40,7 +64,16 @@ def aggregate_fog_models(received_fog_messages: dict):
         CloudResourcesPaths.MODELS_FOLDER_PATH,
         CloudResourcesPaths.CLOUD_MODEL_FILE_NAME
     )
-    cloud_model_weights = tf.keras.models.load_model(cloud_model_file_path, custom_objects=custom_objects).get_weights()
+
+    cache_cloud_model_file_path = os.path.join(SharedResourcesPaths.CACHE_FOLDER_PATH,
+                                               CloudResourcesPaths.CLOUD_MODEL_FILE_NAME)
+
+    if os.path.exists(cloud_model_file_path):
+        cloud_model_weights = (tf.keras.models.load_model(cloud_model_file_path, custom_objects=custom_objects)
+                               .get_weights())
+    else:
+        cloud_model_weights = (tf.keras.models.load_model(cache_cloud_model_file_path, custom_objects=custom_objects)
+                               .get_weights())
 
     fog_models_data = []
     lambda_values = []
@@ -71,9 +104,15 @@ def aggregate_fog_models(received_fog_messages: dict):
             aggregated_layer += fog_weights[layer_index] * normalized_lambda * 0.5  # fog gets remaining 50%
         aggregated_weights[layer_index] = aggregated_layer
 
+    if os.path.exists(cloud_model_file_path):
+        cloud_model = tf.keras.models.load_model(cloud_model_file_path, custom_objects=custom_objects)
+    else:
+        cloud_model = tf.keras.models.load_model(cache_cloud_model_file_path, custom_objects=custom_objects)
+
     # update the cloud model with the aggregated weights
-    cloud_model = tf.keras.models.load_model(cloud_model_file_path, custom_objects=custom_objects)
     cloud_model.set_weights(aggregated_weights)
     cloud_model.save(cloud_model_file_path)
-    logger.info(f"Cloud model aggregation completed. New cloud model saved at: {cloud_model_file_path}")
 
+    cloud_model.save(cache_cloud_model_file_path)
+
+    logger.info(f"Cloud model aggregation completed. New cloud model saved at: {cloud_model_file_path} and cached.")
