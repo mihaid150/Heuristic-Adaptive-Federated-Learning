@@ -46,7 +46,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             await websocket.send_json(response)
     except WebSocketDisconnect:
-        logger.error("WebSocket disconnected.")
+        logger.warning("WebSocket disconnected.")
 
 
 def initialize_node(data: Dict[str, Any]) -> Dict[str, Union[str, Dict[str, Union[str, FedNodeType]]]]:
