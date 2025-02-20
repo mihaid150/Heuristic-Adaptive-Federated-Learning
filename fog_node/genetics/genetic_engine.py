@@ -4,6 +4,8 @@ import random
 import math
 import os
 import base64
+import json
+from typing import Any
 
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,6 +14,7 @@ from scipy.constants import Boltzmann
 from shared.fed_node.node_state import NodeState
 from shared.logging_config import logger
 from fog_node.fog_resources_paths import FogResourcesPaths
+from shared.shared_resources_paths import SharedResourcesPaths
 
 
 class FitnessMin(base.Fitness):
@@ -53,7 +56,7 @@ class GeneticEngine:
         self.population_size = population_size
         self.number_of_generations = number_of_generations
         self.stagnation_limit = stagnation_limit
-        self.toolbox = None
+        self.toolbox: Any = base.Toolbox()
         self.best_fitness = float("inf")
         self.stagnation_counter = 0
         self.boltzmann_constant = Boltzmann
@@ -66,6 +69,19 @@ class GeneticEngine:
         self.fog_rabbitmq_host = None
         self.fog_edge_send_exchange = None
         self.edge_to_fog_queue = None
+
+        self.crossover_probability = 0.7
+        self.mutation_probability = 0.2
+
+        self.min_crossover_probability = 0.3
+        self.max_crossover_probability = 0.9
+        self.min_mutation_probability = 0.1
+        self.max_mutation_probability = 0.6
+
+        self.fog_model_file_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH,
+                                                FogResourcesPaths.FOG_MODEL_FILE_NAME)
+        self.genetic_population_file_path = os.path.join(SharedResourcesPaths.CACHE_FOLDER_PATH,
+                                                         FogResourcesPaths.GENETIC_POPULATION_FILE_NAME)
 
     @staticmethod
     def get_cloud_temperature():
@@ -100,28 +116,23 @@ class GeneticEngine:
         self.fog_edge_send_exchange = fog_edge_send_exchange
         self.edge_to_fog_queue = edge_to_fog_queue
 
-        # toolbox for operators
-        toolbox = base.Toolbox()
-
         # explicitly define the individual creation function
         def create_individual():
             return Individual.random_individual()
 
         # register individual and population creation
-        toolbox.register("individual", create_individual)
+        self.toolbox.register("individual", create_individual)
 
         # register population creation
-        toolbox.register("population", tools.initRepeat, list, toolbox.individual)
+        self.toolbox.register("population", tools.initRepeat, list, self.toolbox.individual)
 
         # register evaluate function creation
-        toolbox.register("evaluate", self.fitness_function)
+        self.toolbox.register("evaluate", self.fitness_function)
 
         # genetic operators
-        toolbox.register("mate", tools.cxOnePoint)  # crossover
-        toolbox.register("mutate", tools.mutUniformInt, low=[1, 16, 1, 1, 1], up=[100, 120, 10, 20, 10], indpb=0.2)
-        toolbox.register("select", tools.selTournament, tournsize=3)  # selection
-
-        self.toolbox = toolbox
+        self.toolbox.register("mate", tools.cxOnePoint)  # crossover
+        self.toolbox.register("mutate", tools.mutUniformInt, low=[1, 16, 1, 1, 1], up=[100, 120, 10, 20, 10], indpb=0.2)
+        self.toolbox.register("select", tools.selTournament, tournsize=3)  # selection
 
     def fitness_function(self, individual):
         """
@@ -132,7 +143,7 @@ class GeneticEngine:
 
         # TODO: currently is using http request to request the metrics on the edge, in the future change to queue/ws
 
-        logger.info("Starting fitness_function for individual: %s", individual)
+        logger.info(f"Starting fitness_function for individual: {individual}")
         # Compute hyperparameters from the individual.
         learning_rate = individual[0] / 10000.0
         batch_size = individual[1]
@@ -144,15 +155,14 @@ class GeneticEngine:
 
         try:
             # Read the fog model file once.
-            fog_model_file_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH,
-                                               FogResourcesPaths.FOG_MODEL_FILE_NAME)
-            logger.info("Reading fog model file from: %s", fog_model_file_path)
-            with open(fog_model_file_path, "rb") as model_file:
+
+            logger.info(f"Reading fog model file from: {self.fog_model_file_path}")
+            with open(self.fog_model_file_path, "rb") as model_file:
                 model_bytes = model_file.read()
             model_file_base64 = base64.b64encode(model_bytes).decode("utf-8")
-            logger.info("Successfully read fog model file. Encoded length: %d", len(model_file_base64))
+            logger.info(f"Successfully read fog model file. Encoded length: {len(model_file_base64)}")
         except Exception as e:
-            logger.error("Error reading fog model file: %s", e)
+            logger.error(f"Error reading fog model file: {e}")
             return float("inf")
 
         # Build a common payload template.
@@ -170,28 +180,28 @@ class GeneticEngine:
             "patience": patience,
             "fine_tune_layers": fine_tune_layers
         }
-        logger.info("Payload template built with keys: %s", list(payload_template.keys()))
+        logger.info(f"Payload template built with keys: {list(payload_template.keys())}")
 
         # Get all evaluation nodes.
         evaluation_nodes = [child for child in NodeState.get_current_node().child_nodes if child.is_evaluation_node]
-        logger.info("Found %d evaluation nodes.", len(evaluation_nodes))
+        logger.info(f"Found {len(evaluation_nodes)} evaluation nodes.")
 
         def send_request(node):
             payload = payload_template.copy()
             payload["child_id"] = node.id
             url = f"http://{node.ip_address}:{node.port}/edge/execute-model-evaluation"
-            logger.info("Sending HTTP POST request to %s with child_id: %s", url, node.id)
+            logger.info(f"Sending HTTP POST request to {url} with child_id: {node.id}.")
             try:
                 # No timeout is specified so that we wait as long as needed.
                 r = requests.post(url, json=payload, timeout=None)
-                logger.info("Received HTTP response from %s: status code %s", url, r.status_code)
+                logger.info(f"Received HTTP response from {url}: status code {r.status_code}")
                 if 200 <= r.status_code < 300:
-                    logger.info("Response from %s accepted.", url)
+                    logger.info(f"Response from {url} accepted.")
                     return r.json()
                 else:
-                    logger.error("HTTP error from %s: status code %s", url, r.status_code)
-            except Exception as e:
-                logger.error("HTTP request error to %s: %s", url, e)
+                    logger.error(f"HTTP error from {url}: status code {r.status_code}")
+            except Exception as e1:
+                logger.error(f"HTTP request error to {url}: {e1}")
             return None
 
         valid_responses = []
@@ -225,9 +235,8 @@ class GeneticEngine:
 
         weights = {"loss": 0.4, "mae": 0.3, "mse": 0.1, "rmse": 0.1, "r2": -0.1}
 
-        def compute_weighted_score(metrics, weights):
-            score = sum(weights[metric] * metrics[metric] for metric in weights)
-            return score
+        def compute_weighted_score(metrics, local_weights):
+            return sum(local_weights[metric] * metrics[metric] for metric in local_weights)
 
         scores = []
         for resp in valid_responses:
@@ -251,19 +260,19 @@ class GeneticEngine:
         if not self.toolbox:
             raise ValueError("Toolbox is not set up. Call setup() before evolve().")
         if self.current_population is None:
-            self.current_population = self.toolbox.population(n=self.population_size)
-            logger.info("Initialized population with %d individuals", len(self.current_population))
+            self.load_population_from_json()
+
+        previous_best = self.best_fitness
 
         best_individual = None
         for generation in range(self.number_of_generations):
             logger.info("Generation %d: Starting evaluation of population.", generation)
-            invalid_ind = [ind for ind in self.current_population if not ind.fitness.valid or not ind.fitness.values]
-            for ind in invalid_ind:
+            for ind in self.current_population:
                 try:
                     fit = self.toolbox.evaluate(ind)
                 except Exception as eval_e:
                     logger.error("Error evaluating individual %s: %s", ind, eval_e)
-                    fit = 1e6  # Penalty value
+                    fit = 1e6  # Use a penalty value
                 ind.fitness.values = (fit,)
 
             try:
@@ -274,6 +283,22 @@ class GeneticEngine:
                 break
 
             logger.info("Generation %d: Best fitness after evaluation: %s", generation, best_fitness)
+
+            # adjust dynamic probabilities based on fitness improvement
+            if best_fitness < previous_best:
+                # improvement: reduce probabilities (with saturation limits)
+                self.crossover_probability = max(self.min_crossover_probability, self.crossover_probability - 0.05)
+                self.mutation_probability = max(self.min_mutation_probability, self.mutation_probability - 0.05)
+                logger.info(f"Generation {generation}: Fitness improved. Decreasing crossover_probability to "
+                            f"{self.crossover_probability} and mutation_probability to {self.mutation_probability}")
+            else:
+                # no improvement or worse: increase probabilities (up to a maximum)
+                self.crossover_probability = min(self.max_crossover_probability, self.crossover_probability + 0.05)
+                self.mutation_probability = min(self.max_mutation_probability, self.mutation_probability + 0.05)
+                logger.info(f"Generation {generation}: No improvement. Increasing crossover_probability to "
+                            f"{self.crossover_probability} and mutation_probability to {self.mutation_probability}")
+
+            previous_best = best_fitness
 
             if best_fitness < self.best_fitness:
                 self.best_fitness = best_fitness
@@ -286,7 +311,7 @@ class GeneticEngine:
                 logger.info("Generation %d: Stagnation limit reached. Stopping evolution.", generation)
                 break
 
-            # Apply genetic operators
+            # apply genetic operators using dynamic probabilities
             offspring = []
             cloud_temperature = self.get_cloud_temperature()
             logger.info("Generation %d: Starting genetic operations with cloud_temperature = %s", generation,
@@ -298,11 +323,11 @@ class GeneticEngine:
                         logger.info("Generation %d: Individual skipped update (cloned).", generation)
                     else:
                         mutant = self.toolbox.clone(individual)
-                        if random.random() < 0.7:  # Crossover probability
+                        if random.random() < self.crossover_probability:  # dynamic crossover probability
                             partner = random.choice(self.current_population)
                             self.toolbox.mate(mutant, self.toolbox.clone(partner))
                             logger.info("Generation %d: Crossover performed.", generation)
-                        if random.random() < 0.2:  # Mutation probability
+                        if random.random() < self.mutation_probability:  # dynamic mutation probability
                             self.toolbox.mutate(mutant)
                             logger.info("Generation %d: Mutation performed.", generation)
                         try:
@@ -331,11 +356,74 @@ class GeneticEngine:
             raise ValueError(f"Requested top {k} individuals, but the population size is {len(self.current_population)}"
                              f".")
 
-        for ind in self.current_population:
-            if not ind.fitness.values:
-                ind.fitness.values = (1e6,)
-        sorted_population = sorted(self.current_population, key=lambda ind: ind.fitness.values[0])
+        for individual in self.current_population:
+            if not individual.fitness.values:
+                individual.fitness.values = (1e6,)
+        sorted_population = sorted(self.current_population, key=lambda ind: individual.fitness.values[0])
         return sorted_population[:k]
 
     def get_number_of_training_nodes(self):
         return self.number_of_training_nodes
+
+    def save_population_to_json(self):
+        """
+        Save the current population to a json file.
+
+        Each individual is stored as a dictionary with:
+            - "chromosome": the list of hyperparameters values
+            - "fitness": the fitness values (if available) or None.
+        """
+        if os.path.exists(self.genetic_population_file_path):
+            os.remove(self.genetic_population_file_path)
+            logger.info(f"Existing population file '{self.genetic_population_file_path}' deleted.")
+
+        population_data = []
+        for individual in self.current_population:
+            # convert the individual (a list) and include fitness values if they exist.
+            # in DEAP fitness.values is usually a tuple
+            fitness = list(individual.fitness.values) if hasattr(individual, "fitness") and individual.fitness.values \
+                else None
+            individual_data = {
+                "chromosome": list(individual),
+                "fitness": fitness
+            }
+            population_data.append(individual_data)
+
+        with open(self.genetic_population_file_path, "w") as f:
+            json.dump(population_data, f, indent=2)
+        logger.info(f"Saved population of {len(self.current_population)} individuals to "
+                    f"{self.genetic_population_file_path}")
+
+    def load_population_from_json(self):
+        """
+        Load the population from a JSON file.
+        Each individual is expected to be a dictionary with keys:
+            - "chromosome": a list of values
+            - "fitness": a list (or None) representing the individual's fitness.
+        If the file does not exist, a new population is generated using the toolbox.
+        :return: list: a population (list of individuals) as used by DEAP
+        """
+        if os.path.exists(self.genetic_population_file_path):
+            logger.info(f"Loading population from {self.genetic_population_file_path}")
+            with open(self.genetic_population_file_path, "r") as f:
+                population_data = json.load(f)
+
+            population = []
+            for individual_data in population_data:
+                # create a new individual via the toolbox
+                individual = self.toolbox.individual()
+                # replace its content with the saved chromosome
+                individual[:] = individual_data.get("chromosome", [])
+                # set its fitness values if present
+                fitness = individual_data.get("fitness")
+                if fitness is not None:
+                    individual.fitness.values = tuple(fitness)
+                population.append(individual)
+            logger.info(f"Loaded population of {len(population)} individuals from {self.genetic_population_file_path}")
+            self.current_population = population
+        else:
+            logger.info(f"No saved population found at {self.genetic_population_file_path}. "
+                        f"Initializing new population.")
+            self.current_population = self.toolbox.population(n=self.population_size)
+            logger.info("Initialized population with %d individuals", len(self.current_population))
+
