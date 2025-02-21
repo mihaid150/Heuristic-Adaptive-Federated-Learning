@@ -24,6 +24,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     response = init_pretraining_process(data)
                 elif operation == "initialize_cloud_training":
                     response = init_periodical_process(data)
+                elif operation == "get_cloud_service_state":
+                    response = get_cloud_service_state()
+                elif operation == "get_federated_simulation_state":
+                    response = get_federated_simulation_state()
+                elif operation == "get_training_process_parameters":
+                    response = get_training_process_parameters()
                 else:
                     response = {"error": "Invalid operation"}
             except Exception as e:
@@ -31,7 +37,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             await websocket.send_json(response)
     except WebSocketDisconnect:
-        logger.error("WebSocket disconnected.")
+        logger.warning("WebSocket disconnected.")
 
 
 def get_cloud_status():
@@ -42,6 +48,18 @@ def get_cloud_status():
         return CloudService.get_status()
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+def get_cloud_service_state():
+    return CloudService.get_cloud_service_state()
+
+
+def get_federated_simulation_state():
+    return CloudService.get_federated_simulation_state()
+
+
+def get_training_process_parameters():
+    return CloudService.get_training_process_parameters()
 
 
 def init_pretraining_process(data):

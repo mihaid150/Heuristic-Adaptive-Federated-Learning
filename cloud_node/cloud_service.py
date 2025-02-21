@@ -3,6 +3,8 @@ import json
 import os
 import time
 import threading
+from enum import Enum
+
 import pika
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
@@ -15,6 +17,17 @@ from shared.monitoring_thread import MonitoringThread
 from shared.logging_config import logger
 
 
+class CloudServiceState(Enum):
+    IDLE = 1
+    OPERATIONAL = 2
+
+
+class FederatedSimulationState(Enum):
+    IDLE = 1
+    PRETRAINING = 2
+    TRAINING = 3
+
+
 class CloudService:
     CLOUD_RABBITMQ_HOST = "cloud-rabbitmq-host"
     FOG_CLOUD_RECEIVE_QUEUE = "fog_to_cloud_queue"
@@ -24,6 +37,44 @@ class CloudService:
     received_fog_messages = {}
     rabbitmq_init_monitor_thread = None
     fog_models_listener_thread = None
+
+    is_cache_active = False
+    genetic_strategy = None
+    model_type = None
+    start_date = None
+    current_date = None
+
+    cloud_service_state = CloudServiceState.IDLE
+    federated_simulation_state = FederatedSimulationState.IDLE
+
+    @staticmethod
+    def get_cloud_service_state():
+        return {
+            "cloud_service_state": CloudService.cloud_service_state.value
+        }
+
+    @staticmethod
+    def get_federated_simulation_state():
+        return {
+            "federated_simulation_state": CloudService.federated_simulation_state.value
+        }
+
+    @staticmethod
+    def get_training_process_parameters():
+        if CloudService.federated_simulation_state == FederatedSimulationState.PRETRAINING:
+            return {
+                "start_date": CloudService.start_date,
+                "current_date": CloudService.current_date,
+                "is_cache_active": CloudService.is_cache_active,
+                "genetic_strategy": CloudService.genetic_strategy,
+                "model_type": CloudService.model_type,
+            }
+        else:
+            return {
+                "current_date": CloudService.current_date,
+                "is_cache_active": CloudService.is_cache_active,
+                "genetic_strategy": CloudService.genetic_strategy,
+            }
 
     @staticmethod
     def monitor_current_node_init() -> None:
@@ -115,6 +166,7 @@ class CloudService:
     def execute_training_process(start_date: str | None, end_date: str, is_cache_active: bool,
                                  genetic_evaluation_strategy: str,
                                  model_type: str):
+        CloudService.cloud_service_state = CloudServiceState.OPERATIONAL
         CloudService.cloud_cooling_scheduler.reset()
         CloudService.received_fog_messages = {}
 
@@ -128,8 +180,17 @@ class CloudService:
                                                    CloudResourcesPaths.CLOUD_MODEL_FILE_NAME)
 
         if start_date is not None:
+            CloudService.federated_simulation_state = FederatedSimulationState.PRETRAINING
             cloud_model = create_initial_lstm_model()
             cloud_model.save(cloud_model_file_path)
+        else:
+            CloudService.federated_simulation_state = FederatedSimulationState.TRAINING
+
+        CloudService.start_date = start_date
+        CloudService.current_date = end_date
+        CloudService.is_cache_active = is_cache_active
+        CloudService.genetic_strategy = genetic_evaluation_strategy
+        CloudService.model_type = model_type
 
         if os.path.exists(cloud_model_file_path):
             logger.info("Cloud model exists in the model folder.")
@@ -191,6 +252,8 @@ class CloudService:
             if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
                 logger.info("Cooling process has finished. Ignoring further messages.")
                 aggregate_fog_models(CloudService.received_fog_messages)
+                delete_all_files_in_folder(CloudResourcesPaths.MODELS_FOLDER_PATH, filter_string="fog")
+                CloudService.cloud_service_state = CloudServiceState.IDLE
                 return
 
             # Deserialize the message
@@ -233,6 +296,7 @@ class CloudService:
             aggregate_fog_models(CloudService.received_fog_messages)
             # Delete the received fog model files (keeping only the cloud model)
             delete_all_files_in_folder(CloudResourcesPaths.MODELS_FOLDER_PATH, filter_string="fog")
+            CloudService.cloud_service_state = CloudServiceState.IDLE
 
     @staticmethod
     def listen_to_receive_fog_queue():
