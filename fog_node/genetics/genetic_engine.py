@@ -33,29 +33,28 @@ class Individual(list):
         self.fitness = FitnessMin()
 
     @staticmethod
-    def random_individual():
+    def random_individual(learning_rate_bound, batch_size_bound, epochs_bound, patience_bound, fine_tune_layers_bound):
         """
         Creates a random individual with attributes initialized within their respective ranges.
         """
-        learning_rate = random.randint(1, 100)
-        batch_size = random.randint(16, 128)
-        epochs = random.randint(1, 10)
-        patience = random.randint(1, 20)
-        fine_tune_layers = random.randint(1, 10)
+        learning_rate = random.randint(learning_rate_bound[0], learning_rate_bound[1])
+        batch_size = random.randint(batch_size_bound[0], batch_size_bound[1])
+        epochs = random.randint(epochs_bound[0], epochs_bound[1])
+        patience = random.randint(patience_bound[0], patience_bound[1])
+        fine_tune_layers = random.randint(fine_tune_layers_bound[0], fine_tune_layers_bound[1])
         return Individual(learning_rate, batch_size, epochs, patience, fine_tune_layers)
 
 
 class GeneticEngine:
-    def __init__(self, population_size, number_of_generations, stagnation_limit):
+    def __init__(self):
         """
         Initializes the Genetic Engine
-        :param population_size: Size of the population.
-        :param number_of_generations: Number of generations to run.
-        :param stagnation_limit: Limit of stagnation for early stopping
         """
-        self.population_size = population_size
-        self.number_of_generations = number_of_generations
-        self.stagnation_limit = stagnation_limit
+        # initialization with default values until update
+        self.population_size = 3
+        self.number_of_generations = 2
+        self.stagnation_limit = 2
+
         self.toolbox: Any = base.Toolbox()
         self.best_fitness = float("inf")
         self.stagnation_counter = 0
@@ -82,6 +81,86 @@ class GeneticEngine:
                                                 FogResourcesPaths.FOG_MODEL_FILE_NAME)
         self.genetic_population_file_path = os.path.join(SharedResourcesPaths.CACHE_FOLDER_PATH,
                                                          FogResourcesPaths.GENETIC_POPULATION_FILE_NAME)
+
+        self.learning_rate_bound = (1, 100)
+        self.batch_size_bound = (16, 128)
+        self.epochs_bound = (1, 10)
+        self.patience_bound = (1, 20)
+        self.fine_tune_layers_bound = (1, 10)
+
+    def configure_training_parameters_bounds(self, lr_min, lr_max, bs_min, bs_max, ep_min, ep_max, pa_min, pa_max,
+                                             ftl_min, ftl_max):
+        self.learning_rate_bound = (lr_min, lr_max)
+        self.batch_size_bound = (bs_min, bs_max)
+        self.epochs_bound = (ep_min, ep_max)
+        self.patience_bound = (pa_min, pa_max)
+        self.fine_tune_layers_bound = (ftl_min, ftl_max)
+
+        logger.info(f"Successfully set the training parameter bounds to: learning rate {self.learning_rate_bound}, "
+                    f" batch size {self.batch_size_bound}, epochs {self.epochs_bound}, patience {self.patience_bound},"
+                    f" fine tune layers {self.fine_tune_layers_bound}.")
+
+    def get_current_training_parameter_bounds(self):
+        return {
+            "learning_rate_lower_bound": self.learning_rate_bound[0],
+            "learning_rate_upper_bound": self.learning_rate_bound[1],
+            "batch_size_lower_bound": self.batch_size_bound[0],
+            "batch_size_upper_bound": self.batch_size_bound[1],
+            "epochs_lower_bound": self.epochs_bound[0],
+            "epochs_upper_bound": self.epochs_bound[1],
+            "patience_lower_bound": self.patience_bound[0],
+            "patience_upper_bound": self.patience_bound[1],
+            "fine_tune_layers_lower_bound": self.fine_tune_layers_bound[0],
+            "fine_tune_layers_upper_bound": self.fine_tune_layers_bound[1]
+        }
+
+    def set_genetic_engine_parameters(self, population_size, number_of_generations, stagnation_limit):
+        if population_size is not None:
+            self.population_size = population_size
+
+        if number_of_generations is not None:
+            self.number_of_generations = number_of_generations
+
+        if stagnation_limit is not None:
+            self.stagnation_limit = stagnation_limit
+
+        self.adjust_population_size()
+
+    def get_genetic_engine_parameters(self):
+        return {
+            "population_size": self.population_size,
+            "number_of_generations": self.number_of_generations,
+            "stagnation_limit": self.stagnation_limit,
+        }
+
+    def adjust_population_size(self):
+        """
+        Adjust the current population to mathc the updated population_size.
+        If the new size is smaller than the current population, only the fittest individuals are retained
+        If the new size is larger, new individuals are added.
+        """
+
+        if self.current_population is None:
+            if os.path.exists(self.genetic_population_file_path):
+                self.load_population_from_json()
+            else:
+                return
+
+        current_size = len(self.current_population)
+        if self.population_size < current_size:
+            # sort individual by fitness and for the ones with invalid fitness use infinity
+            self.current_population.sort(key=lambda ind: ind.fitness.values[0] if ind.fitness.values else float("inf"))
+            self.current_population = self.current_population[:self.population_size]
+            logger.info(f"Population truncated to {self.population_size} individuals.")
+        elif self.population_size > current_size:
+            # add new individuals until population size is met
+            num_to_add = self.population_size - current_size
+            for _ in range(num_to_add):
+                new_individual = self.toolbox.individual()
+                self.current_population.append(new_individual)
+            logger.info(f"{num_to_add} new individuals added to reach a total of {self.population_size}.")
+        else:
+            logger.info("Population size matches the new parameters, thus no adjustment needed.")
 
     @staticmethod
     def get_cloud_temperature():
@@ -118,7 +197,8 @@ class GeneticEngine:
 
         # explicitly define the individual creation function
         def create_individual():
-            return Individual.random_individual()
+            return Individual.random_individual(self.learning_rate_bound, self.batch_size_bound, self.epochs_bound,
+                                                self.patience_bound, self.fine_tune_layers_bound)
 
         # register individual and population creation
         self.toolbox.register("individual", create_individual)
@@ -426,4 +506,3 @@ class GeneticEngine:
                         f"Initializing new population.")
             self.current_population = self.toolbox.population(n=self.population_size)
             logger.info("Initialized population with %d individuals", len(self.current_population))
-
