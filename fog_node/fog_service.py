@@ -19,6 +19,7 @@ from shared.monitoring_thread import MonitoringThread
 from shared.shared_resources_paths import SharedResourcesPaths
 from shared.utils import delete_all_files_in_folder
 from shared.logging_config import logger
+from shared.fed_node.fed_node import ModelScope
 
 
 class FogServiceState(Enum):
@@ -42,6 +43,8 @@ class FogService:
     fog_cooling_scheduler: FogCoolingScheduler = None
     process_init_monitor_thread = None
     fog_service_state = FogServiceState.IDLE
+
+    edge_evaluation_performances = {}
 
     @staticmethod
     def get_fog_service_state():
@@ -174,6 +177,7 @@ class FogService:
                         # Then process the message.
                         message = json.loads(body.decode("utf-8"))
                         child_id = message.get("child_id")
+                        scope = message.get("scope")
                         logger.info(f"Processing message for child id {child_id}.")
 
                         scheduler = FogService.get_fog_cooling_scheduler()
@@ -182,7 +186,13 @@ class FogService:
                         else:
                             logger.error("Fog cooling scheduler is not initialized.")
 
-                        FogService.orchestrate_training(message)
+                        if scope == ModelScope.TRAINING.value:
+                            FogService.orchestrate_training(message)
+                        elif scope == ModelScope.EVALUATION.value:
+                            FogService.edge_evaluation_performances = {}
+                            FogService.orchestrate_evaluation(message)
+                        else:
+                            logger.warning(f"There was met a an unknown scope of the model {scope}.")
                     except Exception as e1:
                         logger.error(f"Error processing message: {e1}")
                         # in case of error we must negatively acknowledge the message and requeue it
@@ -293,6 +303,7 @@ class FogService:
             individual = top_individuals[index]
             message = {
                 "child_id": edge_node.id,
+                "scope": ModelScope.TRAINING.value,
                 "genetic_evaluation": False,
                 "start_date": start_date,
                 "current_date": current_date,
@@ -337,13 +348,24 @@ class FogService:
                     """
                     RabbitMQ callback to process messages received from the edges queue
                     """
-                    FogService.fog_cooling_scheduler.increment_stopping_score()
-                    FogService.get_edge_model(body)
-                    FogService.fog_cooling_scheduler.has_reached_stopping_condition_for_cooler()
+                    message = json.loads(body.decode('utf-8'))
 
-                    if not FogService.fog_cooling_scheduler.is_fog_cooling_operational():
-                        logger.info("Stopping queue listener as cooling process is complete.")
-                        channel.stop_consuming()
+                    if message.get("scope") == ModelScope.TRAINING.value:
+                        FogService.fog_cooling_scheduler.increment_stopping_score()
+                        FogService.get_edge_model(message)
+                        FogService.fog_cooling_scheduler.has_reached_stopping_condition_for_cooler()
+
+                        if not FogService.fog_cooling_scheduler.is_fog_cooling_operational():
+                            logger.info("Stopping queue listener as cooling process is complete.")
+                            channel.stop_consuming()
+                    elif message.get("scope") == ModelScope.EVALUATION.value:
+                        FogService.edge_evaluation_performances[message.get("edge_id")] = message.get("metrics")
+
+                        children_number = len(NodeState.get_current_node().child_nodes)
+                        if len(FogService.edge_evaluation_performances) == children_number:
+                            logger.info("Stopping queue listener as receiving evaluation metrics process is complete.")
+                            channel.stop_consuming()
+                            FogService.send_fog_model_to_cloud(ModelScope.EVALUATION, message.get("evaluation_date"))
 
                 logger.info("Listening for messages from edge nodes...")
                 channel.basic_consume(queue=FogService.EDGE_FOG_RECEIVE_QUEUE, on_message_callback=callback,
@@ -363,11 +385,10 @@ class FogService:
                         logger.error(f"An error occurred in listen_to_edges_receiving_queue finally clause: {e}")
 
     @staticmethod
-    def get_edge_model(body):
+    def get_edge_model(message):
         try:
             if not FogService.fog_cooling_scheduler.is_fog_cooling_operational():
                 return
-            message = json.loads(body.decode('utf-8'))
             edge_model_file_bytes = base64.b64decode(message["model_file"])
             metrics = message.get("metrics")
             edge_id = message.get("edge_id")
@@ -390,20 +411,37 @@ class FogService:
         delete_all_files_in_folder(FogResourcesPaths.MODELS_FOLDER_PATH, filter_string="edge")
 
     @staticmethod
-    def send_fog_model_to_cloud():
-        logger.info("Running the sending of the fog model to cloud.")
+    def send_fog_model_to_cloud(model_scope: ModelScope, evaluation_date: str = None):
+        if model_scope.value == ModelScope.TRAINING.value:
+            logger.info("Running the sending of the fog model to cloud.")
 
-        fog_model_file_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH,
-                                           FogResourcesPaths.FOG_MODEL_FILE_NAME)
-        with open(fog_model_file_path, "rb") as model_file:
-            model_bytes = model_file.read()
-            model_file_base64 = base64.b64encode(model_bytes).decode("utf-8")
+            fog_model_file_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH,
+                                               FogResourcesPaths.FOG_MODEL_FILE_NAME)
+            with open(fog_model_file_path, "rb") as model_file:
+                model_bytes = model_file.read()
+                model_file_base64 = base64.b64encode(model_bytes).decode("utf-8")
 
-        message = {
-            "fog_id": NodeState.get_current_node().id,
-            "lambda_prev": read_lambda_prev(),
-            "model_file": model_file_base64
-        }
+            message = {
+                "scope": model_scope.value,
+                "fog_id": NodeState.get_current_node().id,
+                "lambda_prev": read_lambda_prev(),
+                "model_file": model_file_base64
+            }
+        else:
+            logger.info("Running the sending of edge results to cloud.")
+
+            results = []
+            for edge_id, metrics in FogService.edge_evaluation_performances.items():
+                results.append({
+                    "edge_id": edge_id,
+                    "metrics": metrics
+                })
+            message = {
+                "scope": model_scope.value,
+                "fog_id": NodeState.get_current_node().id,
+                "results": results,
+                "evaluation_date": evaluation_date
+            }
 
         published = False
         while not published:
@@ -420,7 +458,11 @@ class FogService:
                                       body=json.dumps(message))
                 connection.close()
                 published = True
-                logger.info("Fog has sent fog model to cloud node.")
+
+                if model_scope.value == ModelScope.TRAINING.value:
+                    logger.info("Fog has sent fog model to cloud node.")
+                else:
+                    logger.info("Fog has sent edge results to cloud node.")
             except Exception as e:
                 logger.error(f"Error sending fog model to cloud: {e}. Retrying in 5 seconds...")
                 time.sleep(5)
@@ -430,3 +472,51 @@ class FogService:
             node.is_evaluation_node = False
 
         FogService.fog_service_state = FogServiceState.IDLE
+
+    @staticmethod
+    def orchestrate_evaluation(message):
+        try:
+            model_file_base64 = message.get("model_file")
+
+            if not model_file_base64:
+                raise ValueError("Model file is missing in the received message.")
+
+            connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=FogService.FOG_RABBITMQ_HOST,
+                    heartbeat=30
+                )
+            )
+            channel = connection.channel()
+
+            current_node = NodeState.get_current_node()
+            if not current_node:
+                raise ValueError("Current fog node is not initialized.")
+
+            if FogService.genetic_engine.current_population is None:
+                FogService.genetic_engine.load_population_from_json()
+
+            # TODO: update such that if not enough individuals to add some random
+            top_individuals = FogService.genetic_engine.get_top_k_individuals(len(NodeState.get_current_node()
+                                                                                  .child_nodes))
+
+            logger.info(top_individuals)
+
+            for index, edge_node in enumerate(current_node.child_nodes):
+                routing_key = str(edge_node.id)
+                individual = top_individuals[index]
+                message["learning_rate"] = individual[0] / 10000.0
+                message["batch_size"] = individual[1]
+                message["epochs"] = individual[2]
+                message["patience"] = individual[3]
+                message["fine_tune_layers"] = individual[4]
+
+                channel.basic_publish(exchange=FogService.FOG_EDGE_SEND_EXCHANGE, routing_key=routing_key,
+                                      body=json.dumps(message))
+                logger.info(f"Forwarded evaluation model to edge {edge_node.name} ({edge_node.ip_address}:"
+                            f"{edge_node.port})")
+
+            connection.close()
+            # TODO: implement on edge the receiving, evaluation and send back of the result
+        except Exception as e:
+            logger.warning(f"An error occurred during orchestration evaluation: {e}")

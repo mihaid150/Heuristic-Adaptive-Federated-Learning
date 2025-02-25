@@ -9,6 +9,11 @@ class FedNodeType(Enum):
     EDGE_NODE = 3
 
 
+class ModelScope(Enum):
+    TRAINING = 1
+    EVALUATION = 2
+
+
 def generate_unique_id(ip: str) -> str:
     """
     Generate a 64-bit unique ID by combining:

@@ -15,6 +15,7 @@ from shared.fed_node.node_state import NodeState
 from shared.logging_config import logger
 from fog_node.fog_resources_paths import FogResourcesPaths
 from shared.shared_resources_paths import SharedResourcesPaths
+from shared.fed_node.fed_node import ModelScope
 
 
 class FitnessMin(base.Fitness):
@@ -258,7 +259,8 @@ class GeneticEngine:
             "batch_size": batch_size,
             "epochs": number_epochs,
             "patience": patience,
-            "fine_tune_layers": fine_tune_layers
+            "fine_tune_layers": fine_tune_layers,
+            "scope": ModelScope.TRAINING.value
         }
         logger.info(f"Payload template built with keys: {list(payload_template.keys())}")
 

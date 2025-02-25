@@ -8,6 +8,7 @@ from enum import Enum
 import pika
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
+from shared.fed_node.fed_node import ModelScope
 from shared.shared_resources_paths import SharedResourcesPaths
 from cloud_node.model_manager import create_initial_lstm_model, aggregate_fog_models
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
@@ -35,6 +36,8 @@ class CloudService:
 
     cloud_cooling_scheduler = CloudCoolingScheduler()
     received_fog_messages = {}
+    received_fog_results = []
+    evaluation_received_results_counter = 0
     rabbitmq_init_monitor_thread = None
     fog_models_listener_thread = None
 
@@ -183,6 +186,15 @@ class CloudService:
             CloudService.federated_simulation_state = FederatedSimulationState.PRETRAINING
             cloud_model = create_initial_lstm_model()
             cloud_model.save(cloud_model_file_path)
+
+            # delete the model performance json from the previous simulation
+            model_performance_file_path = os.path.join(SharedResourcesPaths.CACHE_FOLDER_PATH,
+                                                       CloudResourcesPaths.MODEL_PERFORMANCE_RESULTS_FILE_NAME)
+
+            if os.path.exists(model_performance_file_path):
+                delete_all_files_in_folder(SharedResourcesPaths.CACHE_FOLDER_PATH, 'model_performance')
+
+            CloudService.received_fog_results = []
         else:
             CloudService.federated_simulation_state = FederatedSimulationState.TRAINING
 
@@ -209,7 +221,8 @@ class CloudService:
             "is_cache_active": is_cache_active,
             "genetic_evaluation_strategy": genetic_evaluation_strategy,
             "model_type": model_type,
-            "model_file": encoded_model
+            "model_file": encoded_model,
+            "scope": ModelScope.TRAINING.value
         }
 
         CloudService.cloud_cooling_scheduler.start_cooling()
@@ -243,10 +256,9 @@ class CloudService:
         connection.close()
 
     @staticmethod
-    def get_fog_model(body):
+    def get_fog_model(message):
         """
         Process messages from the queue whenever they are received.
-        :param body: The actual message body.
         """
         try:
             if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
@@ -256,8 +268,6 @@ class CloudService:
                 CloudService.cloud_service_state = CloudServiceState.IDLE
                 return
 
-            # Deserialize the message
-            message = json.loads(body.decode('utf-8'))
             child_id = message.get("fog_id")
 
             # Process the message
@@ -314,11 +324,19 @@ class CloudService:
                 channel = connection.channel()
 
                 def callback(ch, _method, _properties, body):
-                    CloudService.get_fog_model(body)
-                    # check if cooling has stopped
-                    if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
-                        logger.info("Stopping queue listener as cooling process is complete.")
-                        ch.stop_consuming()
+                    message = json.loads(body.decode('utf-8'))
+
+                    if int(message.get("scope")) == ModelScope.TRAINING.value:
+                        CloudService.get_fog_model(message)
+                        # check if cooling has stopped
+                        if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
+                            logger.info("Stopping queue listener as cooling process is complete.")
+                            ch.stop_consuming()
+                    elif int(message.get("scope")) == ModelScope.EVALUATION.value:
+                        CloudService.get_fog_evaluation_results(message)
+                    else:
+                        logger.warning(f"Received message from fog with scope {message.get('scope')} being not "
+                                       f"recognized.")
 
                 logger.info("Listening for messages from fog nodes...")
                 channel.basic_consume(
@@ -327,6 +345,7 @@ class CloudService:
                     auto_ack=True
                 )
                 channel.start_consuming()
+                # TODO: implement to recognize the evaluation performance coming from fogs (edges)
             except (pika.exceptions.AMQPConnectionError, pika.exceptions.StreamLostError) as e:
                 logger.error(f"Connection error in listen_to_receive_fog_queue: {e}. Reconnecting in 5 seconds...")
                 time.sleep(5)
@@ -339,3 +358,113 @@ class CloudService:
                         connection.close()
                     except Exception as e:
                         logger.error(f"An error occurred in listen_to_receive_fog_queue finally clause: {e}")
+
+    @staticmethod
+    def perform_model_evaluation(evaluation_date: str):
+        CloudService.cloud_service_state = CloudServiceState.OPERATIONAL
+        CloudService.evaluation_received_results_counter = 0
+
+        if CloudService.CLOUD_RABBITMQ_HOST == "cloud-rabbitmq-host":
+            raise ValueError("RabbitMQ host is not initialized. Please wait for the node to be detected.")
+
+        cloud_model_file_path = os.path.join(CloudResourcesPaths.MODELS_FOLDER_PATH,
+                                             CloudResourcesPaths.CLOUD_MODEL_FILE_NAME)
+
+        cache_cloud_model_file_path = os.path.join(SharedResourcesPaths.CACHE_FOLDER_PATH,
+                                                   CloudResourcesPaths.CLOUD_MODEL_FILE_NAME)
+
+        if os.path.exists(cloud_model_file_path):
+            logger.info("Cloud model exists in the model folder.")
+            with open(cloud_model_file_path, "rb") as model_file:
+                model_bytes = model_file.read()
+                encoded_model = base64.b64encode(model_bytes).decode('utf-8')
+        elif os.path.exists(cache_cloud_model_file_path):
+            with open(cache_cloud_model_file_path, "rb") as model_file:
+                model_bytes = model_file.read()
+                encoded_model = base64.b64encode(model_bytes).decode('utf-8')
+        else:
+            return {"error": "No cloud model found, neither in container, neither in volume."}
+
+        payload = {
+            "start_date": None,
+            "current_date": evaluation_date,
+            "model_file": encoded_model,
+            "scope": ModelScope.EVALUATION.value
+        }
+
+        CloudService.start_listener()
+        CloudService._send_message_to_children(payload)
+
+    @staticmethod
+    def get_fog_evaluation_results(message):
+        logger.info(f"Processing evaluation result received from fog: {message}")
+        fog_id = message.get("fog_id")
+        results = message.get("results", [])
+        evaluation_date = message.get("evaluation_date")
+
+        # Create a new record for this fog's evaluation and append it to the list.
+        record = {
+            "fog_id": fog_id,
+            "results": results,
+            "evaluation_date": evaluation_date
+        }
+        CloudService.received_fog_results.append(record)
+        CloudService.evaluation_received_results_counter += 1
+
+        # When results from all fog nodes have been received, finalize and save the performance data.
+        if CloudService.evaluation_received_results_counter == len(NodeState.get_current_node().child_nodes):
+            CloudService.cloud_service_state = CloudServiceState.IDLE
+            CloudService.save_model_performance_to_json()
+
+    @staticmethod
+    def load_model_performance_from_json() -> list:
+        """
+        Load the model performance results from the JSON file.
+        Returns a list of performance records (each a dict) if the file exists, or an empty list.
+        """
+        model_performance_file_path = os.path.join(
+            SharedResourcesPaths.CACHE_FOLDER_PATH,
+            CloudResourcesPaths.MODEL_PERFORMANCE_RESULTS_FILE_NAME
+        )
+        if os.path.exists(model_performance_file_path):
+            try:
+                with open(model_performance_file_path, "r") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        logger.info(f"Loaded {len(data)} existing performance records.")
+                        return data
+                    else:
+                        logger.warning("Performance file format unexpected; starting with empty list.")
+                        return []
+            except Exception as e:
+                logger.error(f"Error loading model performance file: {e}")
+                return []
+        else:
+            return []
+
+    @staticmethod
+    def save_model_performance_to_json() -> None:
+        """
+        Append the new evaluation records from CloudService.received_fog_results to the existing
+        performance data stored in the JSON file.
+        """
+        model_performance_file_path = os.path.join(
+            SharedResourcesPaths.CACHE_FOLDER_PATH,
+            CloudResourcesPaths.MODEL_PERFORMANCE_RESULTS_FILE_NAME
+        )
+        # Load any existing data (a list of records)
+        existing_data = CloudService.load_model_performance_from_json()
+        # Assume that for evaluation we store a list of records.
+        # CloudService.received_fog_results should be a list of new records for the current evaluation round.
+        if not isinstance(CloudService.received_fog_results, list):
+            logger.error("CloudService.received_fog_results is not a list; cannot save performance results.")
+            return
+        # Combine the old and new records
+        combined_data = existing_data + CloudService.received_fog_results
+        try:
+            with open(model_performance_file_path, "w") as f:
+                json.dump(combined_data, f, indent=2)
+            logger.info(f"Saved {len(CloudService.received_fog_results)} new performance records, "
+                        f"total now {len(combined_data)}.")
+        except Exception as e:
+            logger.error(f"Error saving model performance file: {e}")

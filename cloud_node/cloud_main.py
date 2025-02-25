@@ -30,6 +30,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     response = get_federated_simulation_state()
                 elif operation == "get_training_process_parameters":
                     response = get_training_process_parameters()
+                elif operation == "perform_model_evaluation":
+                    response = perform_model_evaluation(data)
                 else:
                     response = {"error": "Invalid operation"}
             except Exception as e:
@@ -108,3 +110,9 @@ def init_periodical_process(data):
     except Exception as e:
         logger.error(f"Unhandled error in init_periodical_process: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+def perform_model_evaluation(data):
+    CloudService.perform_model_evaluation(data.get("end_date"))
+    return {"message": "Model evaluation has been started."}
+

@@ -8,6 +8,7 @@ import time
 import threading
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
+from shared.fed_node.fed_node import ModelScope
 from edge_node.edge_resources_paths import EdgeResourcesPaths
 from edge_node.model_manager import pretrain_edge_model, retrain_edge_model
 from shared.monitoring_thread import MonitoringThread
@@ -209,6 +210,7 @@ class EdgeService:
             current_date = message.get("current_date")
             # is_cache_active = message.get("is_cache_active")
             # model_type = message.get("model_type")
+            scope = int(message.get("scope"))
             model_file_base64 = message.get("model_file")
             learning_rate = message.get("learning_rate")
             batch_size = message.get("batch_size")
@@ -246,7 +248,8 @@ class EdgeService:
                 response = {
                     "edge_id": NodeState.get_current_node().id,
                     "metrics": metrics,
-                    "model_file": model_file_base64_resp
+                    "model_file": model_file_base64_resp,
+                    "scope": ModelScope.TRAINING.value
                 }
             else:
                 # Retraining process.
@@ -268,28 +271,39 @@ class EdgeService:
                 score_before = compute_weighted_score(metrics["before_training"], weights)
                 score_after = compute_weighted_score(metrics["after_training"], weights)
 
-                if score_after < score_before:
-                    retrained_model_file_path = os.path.join(
-                        EdgeResourcesPaths.MODELS_FOLDER_PATH,
-                        EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME
-                    )
-                    with open(retrained_model_file_path, "rb") as model_file:
-                        model_bytes = model_file.read()
-                        model_file_base64_resp = base64.b64encode(model_bytes).decode("utf-8")
+                if scope == ModelScope.EVALUATION.value:
                     response = {
                         "edge_id": NodeState.get_current_node().id,
                         "metrics": metrics,
-                        "model_file": model_file_base64_resp
+                        "scope": ModelScope.EVALUATION.value,
+                        "evaluation_date": current_date
                     }
                 else:
-                    with open(edge_model_file_path, "rb") as model_file:
-                        model_bytes = model_file.read()
-                        model_file_base64_resp = base64.b64encode(model_bytes).decode("utf-8")
-                    response = {
-                        "edge_id": NodeState.get_current_node().id,
-                        "metrics": metrics,
-                        "model_file": model_file_base64_resp
-                    }
+                    if score_after < score_before:
+                        retrained_model_file_path = os.path.join(
+                            EdgeResourcesPaths.MODELS_FOLDER_PATH,
+                            EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME
+                        )
+                        with open(retrained_model_file_path, "rb") as model_file:
+                            model_bytes = model_file.read()
+                            model_file_base64_resp = base64.b64encode(model_bytes).decode("utf-8")
+                        response = {
+                            "edge_id": NodeState.get_current_node().id,
+                            "metrics": metrics,
+                            "model_file": model_file_base64_resp,
+                            "scope": ModelScope.TRAINING.value
+                        }
+
+                    else:
+                        with open(edge_model_file_path, "rb") as model_file:
+                            model_bytes = model_file.read()
+                            model_file_base64_resp = base64.b64encode(model_bytes).decode("utf-8")
+                        response = {
+                            "edge_id": NodeState.get_current_node().id,
+                            "metrics": metrics,
+                            "model_file": model_file_base64_resp,
+                            "scope": ModelScope.TRAINING.value
+                        }
             return response
         finally:
             delete_all_files_in_folder(EdgeResourcesPaths.MODELS_FOLDER_PATH, filter_string=None)
