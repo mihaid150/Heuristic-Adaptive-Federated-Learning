@@ -468,3 +468,11 @@ class CloudService:
                         f"total now {len(combined_data)}.")
         except Exception as e:
             logger.error(f"Error saving model performance file: {e}")
+
+    @staticmethod
+    def get_model_performance_evaluation() -> dict:
+        """
+        Loads the performance evaluation records from the JSON file and returns them.
+        """
+        performance_records = CloudService.load_model_performance_from_json()
+        return {"performance_results": performance_records}
