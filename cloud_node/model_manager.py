@@ -9,51 +9,21 @@ from keras.src.losses import MeanSquaredError
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
 from shared.shared_resources_paths import SharedResourcesPaths
 from shared.logging_config import logger
+from model_architectures import (create_initial_lstm_model, create_attention_lstm_model,
+                                 create_enhanced_attention_lstm_model)
 
 
 # Setting the environment variable to suppress TensorFlow low-level logs
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 
-def create_initial_lstm_model(sequence_length=60, num_features=5):
-    """
-    Create and compile an enhanced LSTM model for time series forecasting.
-
-    The model includes:
-      - A 1D convolution layer to capture local temporal patterns.
-      - Batch normalization and dropout for regularization.
-      - Two LSTM layers with tanh activations.
-      - Dense layers to learn non-linear relationships.
-
-    Parameters:
-        sequence_length (int): The length of the input sequences.
-        num_features (int): The number of features per timestep.
-
-    Returns:
-        tf.keras.Model: A compiled LSTM model.
-    """
-    inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
-
-    # Convolutional block to capture local patterns
-    x = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
-
-    # LSTM layers for sequential modeling
-    x = tf.keras.layers.LSTM(64, activation='tanh', return_sequences=True)(x)
-    x = tf.keras.layers.LSTM(128, activation='tanh')(x)
-
-    # Dense layers for non-linear transformations
-    x = tf.keras.layers.Dense(64, activation='relu')(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
-    outputs = tf.keras.layers.Dense(1)(x)
-
-    model = tf.keras.Model(inputs, outputs)
-    optimizer = tf.keras.optimizers.Adam()
-    model.compile(optimizer=optimizer, loss='mse', metrics=["mae", "mse"])
-
-    logger.info(f"Created model with input shape ({sequence_length}, {num_features})")
-    return model
+def create_model(model_type):
+    if model_type == "1":
+        return create_initial_lstm_model()
+    elif model_type == "2":
+        return create_attention_lstm_model()
+    elif model_type == "3":
+        return create_enhanced_attention_lstm_model()
 
 
 def aggregate_fog_models(received_fog_messages: dict):
