@@ -5,7 +5,8 @@ import math
 import os
 import base64
 import json
-from typing import Any
+import time
+from typing import Any, List
 
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -46,6 +47,29 @@ class Individual(list):
         return Individual(learning_rate, batch_size, epochs, patience, fine_tune_layers)
 
 
+def select_evaluation_node():
+    """
+    Select an evaluation node from the list of current node children.
+    Priority:
+        - If one or more nodes have never been used (timestamp is None), choose one randomly.
+        - Otherwise, select the node with the oldest last_time_fitness_evaluation_performed_timestamp.
+    Also, mark only the chosen node's is_evaluation_node flag as True and reset others.
+    """
+    # filter nodes that have never been used for evaluation
+    children_nodes = NodeState.get_current_node().child_nodes
+    never_used = [node for node in children_nodes if node.last_time_fitness_evaluation_performed_timestamp is None]
+
+    if never_used:
+        selected = random.choice(never_used)
+    else:
+        selected = min(children_nodes, key=lambda node: node.last_time_fitness_evaluation_performed_timestamp)
+
+    for node in children_nodes:
+        node.is_evaluation_node = (node == selected)
+
+    return selected
+
+
 class GeneticEngine:
     def __init__(self):
         """
@@ -63,8 +87,6 @@ class GeneticEngine:
         self.additional_factor = 1e23
         self.current_population = None
         self.operating_data_date = []
-        self.number_of_evaluation_nodes = None
-        self.number_of_training_nodes = None
         self.genetic_evaluation_strategy = None
         self.fog_rabbitmq_host = None
         self.fog_edge_send_exchange = None
@@ -172,10 +194,6 @@ class GeneticEngine:
 
     def clear_operating_data_date(self):
         self.operating_data_date = []
-
-    def set_number_of_evaluation_training_nodes(self, no_eval_nodes, no_training_nodes):
-        self.number_of_evaluation_nodes = no_eval_nodes
-        self.number_of_training_nodes = no_training_nodes
 
     def should_skip_update(self, fitness, cloud_temperature):
         """
@@ -303,18 +321,6 @@ class GeneticEngine:
                 except Exception as e:
                     logger.error("Exception while processing response from node %s: %s", node.id, e)
 
-        logger.info("Collected %d valid responses out of required %d.", len(valid_responses),
-                    self.number_of_evaluation_nodes)
-        required = self.number_of_evaluation_nodes
-        # If not enough responses are received, apply penalty defaults.
-        if len(valid_responses) < required:
-            logger.error("Not enough valid responses received; applying penalty for missing responses.")
-            penalty = {"loss": 1e6, "mae": 1e6, "mse": 1e6, "rmse": 1e6, "r2": 1e6}
-            penalty_response = {"metrics": {"before_training": penalty, "after_training": penalty}}
-            for _ in range(required - len(valid_responses)):
-                valid_responses.append(penalty_response)
-            logger.info("Total responses after penalty: %d", len(valid_responses))
-
         weights = {"loss": 0.4, "mae": 0.3, "mse": 0.1, "rmse": 0.1, "r2": -0.1}
 
         def compute_weighted_score(metrics, local_weights):
@@ -348,7 +354,10 @@ class GeneticEngine:
 
         best_individual = None
         for generation in range(self.number_of_generations):
-            logger.info("Generation %d: Starting evaluation of population.", generation)
+            selected_node = select_evaluation_node()
+            logger.info(f"Generation {generation}: Selected evaluation node {selected_node.name}.")
+
+            logger.info(f"Generation {generation}: Starting evaluation of population.")
             for ind in self.current_population:
                 try:
                     fit = self.toolbox.evaluate(ind)
@@ -422,6 +431,7 @@ class GeneticEngine:
             logger.info("Generation %d: Genetic operations complete. Offspring count = %d", generation, len(offspring))
             self.current_population[:] = offspring
             logger.info("Generation %d: End of generation.", generation)
+            selected_node.last_time_fitness_evaluation_performed_timestamp = time.time_ns()
 
         logger.info("Evolution complete! Best individual: %s with fitness %s", best_individual, self.best_fitness)
 
@@ -443,9 +453,6 @@ class GeneticEngine:
                 individual.fitness.values = (1e6,)
         sorted_population = sorted(self.current_population, key=lambda ind: individual.fitness.values[0])
         return sorted_population[:k]
-
-    def get_number_of_training_nodes(self):
-        return self.number_of_training_nodes
 
     def save_population_to_json(self):
         """

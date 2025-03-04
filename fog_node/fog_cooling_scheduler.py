@@ -103,8 +103,7 @@ class FogCoolingScheduler:
         self.stopping_score += 1
 
     def has_reached_stopping_condition_for_cooler(self) -> bool:
-        if self.stopping_score == sum(1 for node in NodeState.get_current_node().child_nodes if
-                                      not node.is_evaluation_node):
+        if self.stopping_score == len(NodeState.current_node.child_nodes):
             self.stop_cooling()
             self.stopping_score = 0
             return True

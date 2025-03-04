@@ -3,7 +3,6 @@
 import base64
 import json
 import os
-import random
 import threading
 import time
 from enum import Enum
@@ -114,10 +113,6 @@ class FogService:
         FogService.init_rabbitmq()
         FogService.genetic_engine.setup(FogService.FOG_RABBITMQ_HOST, FogService.FOG_EDGE_SEND_EXCHANGE,
                                         FogService.EDGE_FOG_RECEIVE_QUEUE)
-        FogService.genetic_engine.set_number_of_evaluation_training_nodes(
-            1,
-            len(NodeState.get_current_node().child_nodes) - 1
-        )
         cloud_listener = threading.Thread(target=FogService.listen_to_cloud_receiving_queue, daemon=True)
         cloud_listener.start()
 
@@ -250,14 +245,6 @@ class FogService:
                         f"{is_cache_active}, strategy: {genetic_evaluation_strategy}")
 
             # run the genetic engine
-            evaluation_nodes_index = []
-            while len(evaluation_nodes_index) < FogService.genetic_engine.number_of_evaluation_nodes:
-                evaluation_nodes_index.append(random.randint(0, len(NodeState.get_current_node().child_nodes) - 1))
-
-            for index, edge_node in enumerate(NodeState.get_current_node().child_nodes):
-                if index in evaluation_nodes_index:
-                    edge_node.is_evaluation_node = True
-
             if start_date is not None:
                 FogService.genetic_engine.set_operating_data_date([start_date, current_date])
                 # to not inherit population from a previous simulation
@@ -298,7 +285,7 @@ class FogService:
         if not current_node:
             raise ValueError("Current fog node is not initialized.")
 
-        trainable_edges = [node for node in current_node.child_nodes if not node.is_evaluation_node]
+        trainable_edges = NodeState.get_current_node().child_nodes
         for index, edge_node in enumerate(trainable_edges):
             individual = top_individuals[index]
             message = {
