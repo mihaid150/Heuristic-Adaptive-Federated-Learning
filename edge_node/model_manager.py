@@ -13,63 +13,45 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
 
-def create_initial_lstm_model(sequence_length=60, num_features=5):
+def create_sequences_with_padding(data, sequence_length=60):
     """
-    Create and compile an enhanced LSTM model for time series forecasting.
+    Convert a 2D array (n_samples, features) into a 3D array of sequences,
+    where each sequence has a fixed length equal to `sequence_length` timesteps.
 
-    The model includes:
-      - A 1D convolution layer to capture local temporal patterns.
-      - Batch normalization and dropout for regularization.
-      - Two LSTM layers with tanh activations.
-      - Dense layers to learn non-linear relationships.
+    A sliding window of length `sequence_length` is used if possible.
+    If the entire data is shorter than the desired window length, the data
+    is padded with zeros to reach `sequence_length`. Additionally, if only one
+    sequence is generated, it is duplicated to ensure at least 2 sequences.
 
     Parameters:
-        sequence_length (int): The length of the input sequences.
-        num_features (int): The number of features per timestep.
+        data (np.array): 2D array of shape (n_samples, num_features).
+        sequence_length (int): The desired fixed length for the sequences.
 
     Returns:
-        tf.keras.Model: A compiled LSTM model.
+        np.array: 3D array of shape (num_sequences, sequence_length, num_features).
     """
-    inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
+    n_samples, num_features = data.shape
 
-    # Convolutional block to capture local patterns
-    x = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')(inputs)
-    x = tf.keras.layers.BatchNormalization()(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
+    if n_samples >= sequence_length:
+        num_windows = n_samples - sequence_length + 1
+        sequences = [data[i:i + sequence_length] for i in range(num_windows)]
+        sequences = np.array(sequences)
+        logger.info(
+            f"Created {sequences.shape[0]} sequences of fixed length {sequence_length} with {num_features} features.")
+    else:
+        padding_needed = sequence_length - n_samples
+        pad = np.zeros((padding_needed, num_features))
+        padded_data = np.vstack([data, pad])
+        sequences = np.expand_dims(padded_data, axis=0)
+        logger.warning(f"Data length ({n_samples}) is less than the desired window length ({sequence_length}). "
+                       f"Returning a single padded sequence of fixed length {sequence_length}.")
 
-    # LSTM layers for sequential modeling
-    x = tf.keras.layers.LSTM(64, activation='tanh', return_sequences=True)(x)
-    x = tf.keras.layers.LSTM(128, activation='tanh')(x)
+    # Ensure at least two sequences are available for metric computation.
+    if sequences.shape[0] < 2:
+        sequences = np.concatenate([sequences, sequences], axis=0)
+        logger.warning(
+            "Only one sequence was created; replicating it to ensure at least two sequences for metrics computation.")
 
-    # Dense layers for non-linear transformations
-    x = tf.keras.layers.Dense(64, activation='relu')(x)
-    x = tf.keras.layers.Dropout(0.2)(x)
-    outputs = tf.keras.layers.Dense(1)(x)
-
-    model = tf.keras.Model(inputs, outputs)
-    optimizer = tf.keras.optimizers.Adam()
-    model.compile(optimizer=optimizer, loss='mse', metrics=["mae", "mse"])
-
-    logger.info(f"Created model with input shape ({sequence_length}, {num_features})")
-    return model
-
-
-def create_sequences(data, sequence_length=60):
-    """
-    Convert a 2D array (n_samples, features) into a 3D array of sequences.
-    Each sequence is a sliding window of fixed length.
-
-    Parameters:
-        data (np.array): 2D array of shape (n_samples, features).
-        sequence_length (int): The length of each sequence.
-
-    Returns:
-        np.array: 3D array of shape (n_samples - sequence_length + 1, sequence_length, features)
-    """
-    num_sequences = len(data) - sequence_length + 1
-    sequences = [data[i:i + sequence_length] for i in range(num_sequences)]
-    sequences = np.array(sequences)
-    logger.info(f"Created {sequences.shape[0]} sequences of length {sequence_length} with {data.shape[1]} features")
     return sequences
 
 
@@ -98,7 +80,7 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
 
     # Create sequences and corresponding targets
     num_sequences = len(X) - sequence_length + 1
-    X_seq = create_sequences(X, sequence_length=sequence_length)
+    X_seq = create_sequences_with_padding(X, sequence_length=sequence_length)
     y_seq = y[sequence_length - 1: sequence_length - 1 + num_sequences]
     logger.info(f"Created sequences: X_seq shape: {X_seq.shape}, y_seq shape: {y_seq.shape}")
 
@@ -219,11 +201,11 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
 
     # Create sequences for both training and evaluation sets
     num_train_seq = len(X_train) - sequence_length + 1
-    X_train_seq = create_sequences(X_train, sequence_length=sequence_length)
+    X_train_seq = create_sequences_with_padding(X_train, sequence_length=sequence_length)
     y_train_seq = y_train[sequence_length - 1: sequence_length - 1 + num_train_seq]
 
     num_eval_seq = len(X_eval) - sequence_length + 1
-    X_eval_seq = create_sequences(X_eval, sequence_length=sequence_length)
+    X_eval_seq = create_sequences_with_padding(X_eval, sequence_length=sequence_length)
     y_eval_seq = y_eval[sequence_length - 1: sequence_length - 1 + num_eval_seq]
 
     logger.info(f"Training sequences: X_train_seq shape: {X_train_seq.shape}, y_train_seq shape: {y_train_seq.shape}")
@@ -295,3 +277,79 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
     logger.info(f"Retrained model saved at: {retrained_edge_model_file_path}")
 
     return metrics
+
+
+def evaluate_edge_model(edge_model_file_path: str, date: str, batch_size: int, sequence_length=60):
+    """
+    Evaluate the edge model on next day's data (used as evaluation data) without retraining.
+    This function processes the data for the next day, creates fixed-length sequences
+    using padding (if necessary), computes evaluation metrics (loss, MAE, MSE, RMSE, R²),
+    and returns a list of (real, predicted) pairs.
+
+    Parameters:
+        edge_model_file_path (str): Path to the saved edge model.
+        date (str): The current day date (in a format recognized by pd.to_datetime).
+                    The evaluation data is taken from the next day.
+        batch_size (int): Batch size used for model evaluation.
+        sequence_length (int): The sliding window length (e.g., 60).
+
+    Returns:
+        tuple: A tuple (metrics, prediction_pairs) where:
+            - metrics (dict): Evaluation metrics.
+            - prediction_pairs (list): A list of tuples (real_value, predicted_value) for each evaluation sequence.
+    """
+    # Define file paths for current and next day data
+    current_day_data_path = EdgeResourcesPaths.CURRENT_DAY_DATA_PATH
+    next_day_data_path = EdgeResourcesPaths.NEXT_DAY_DATA_PATH
+
+    # Process current day's data (if needed for consistency, though not used in evaluation)
+    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", date, current_day_data_path)
+    preprocess_data(current_day_data_path, "datetime", "apparent power (kWh)")
+
+    # Next day's data (used for evaluation)
+    next_day = pd.to_datetime(date) + pd.Timedelta(days=1)
+    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
+                            next_day.strftime("%Y-%m-%d"), next_day_data_path)
+    preprocess_data(next_day_data_path, "datetime", "apparent power (kWh)")
+
+    eval_data = pd.read_csv(next_day_data_path)
+    logger.info(f"Evaluation data shape: {eval_data.shape}")
+
+    # Prepare input features and target from evaluation data
+    X_eval = eval_data[["value_rolling_mean_3", "value_rolling_max_3", "value_rolling_min_3",
+                        "value_rolling_mean_6", "value_rolling_max_6"]].values
+    y_eval = eval_data["value"].values
+
+    # Create evaluation sequences using the helper function (which pads or duplicates if needed)
+    X_eval_seq = create_sequences_with_padding(X_eval, sequence_length=sequence_length)
+    num_eval_seq = len(X_eval) - sequence_length + 1  # number of windows from raw data
+    y_eval_seq = y_eval[sequence_length - 1: sequence_length - 1 + num_eval_seq]
+    logger.info(f"Evaluation sequences: X_eval_seq shape: {X_eval_seq.shape}, y_eval_seq shape: {y_eval_seq.shape}")
+
+    # Load the trained model (ensure custom objects are provided if needed)
+    custom_objects = {"mse": tf.keras.losses.MeanSquaredError()}
+    model = tf.keras.models.load_model(edge_model_file_path, custom_objects=custom_objects)
+
+    # Evaluate the model on the evaluation sequences
+    logger.info("Evaluating the model on next day's data...")
+    evaluation = model.evaluate(X_eval_seq, y_eval_seq, batch_size=batch_size, verbose=1)
+    predictions = model.predict(X_eval_seq)
+
+    # Compute additional metrics
+    r2 = r2_score(y_eval_seq, predictions)
+    rmse = np.sqrt(evaluation[1])
+    metrics = {
+        "loss": evaluation[0],
+        "mae": evaluation[1],
+        "mse": evaluation[2],
+        "rmse": rmse,
+        "r2": r2
+    }
+
+    # Create a list of (real, predicted) pairs.
+    predictions_flat = predictions.flatten()
+    real_values = y_eval_seq.flatten()
+    prediction_pairs = list(zip(real_values.tolist(), predictions_flat.tolist()))
+
+    logger.info(f"Evaluation metrics: {metrics}")
+    return metrics, prediction_pairs
