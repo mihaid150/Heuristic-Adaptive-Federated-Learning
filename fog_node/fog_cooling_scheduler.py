@@ -44,7 +44,7 @@ class FogCoolingScheduler:
         """
         The cooling process that runs periodically in a separate thread.
         """
-        counter = 0
+        # counter = 0
         while self.is_cooling_operational:
             with self.lock:
                 if self.temperature > self.cooling_threshold:
@@ -63,9 +63,9 @@ class FogCoolingScheduler:
                     logger.info("Cooling process has reached the cooldown threshold. Stopping...")
 
             # Increase counter and log every 12 iterations (i.e., every 60 seconds)
-            counter += 1
-            if counter % 12 == 0:
-                logger.info(f"Cooling... Current temperature: {self.temperature:.4f}")
+            # counter += 1
+            # if counter % 12 == 0:
+            #     logger.info(f"Cooling... Current temperature: {self.temperature:.4f}")
 
             # Sleep for 5 seconds between iterations
             time.sleep(5)
