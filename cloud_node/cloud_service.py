@@ -10,7 +10,7 @@ from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
 from shared.fed_node.fed_node import ModelScope
 from shared.shared_resources_paths import SharedResourcesPaths
-from cloud_node.model_manager import create_initial_lstm_model, aggregate_fog_models
+from cloud_node.model_manager import create_model, aggregate_fog_models
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
 from cloud_node.cloud_cooling_scheduler import CloudCoolingScheduler
 from shared.utils import delete_all_files_in_folder
@@ -184,7 +184,7 @@ class CloudService:
 
         if start_date is not None:
             CloudService.federated_simulation_state = FederatedSimulationState.PRETRAINING
-            cloud_model = create_initial_lstm_model()
+            cloud_model = create_model(model_type)
             cloud_model.save(cloud_model_file_path)
 
             # delete the model performance json from the previous simulation
@@ -397,7 +397,7 @@ class CloudService:
 
     @staticmethod
     def get_fog_evaluation_results(message):
-        logger.info(f"Processing evaluation result received from fog: {message}")
+        logger.info(f"Processing evaluation result received from fog: fog_id: {message.get('fog_id')}.")
         fog_id = message.get("fog_id")
         results = message.get("results", [])
         evaluation_date = message.get("evaluation_date")
@@ -470,9 +470,83 @@ class CloudService:
             logger.error(f"Error saving model performance file: {e}")
 
     @staticmethod
-    def get_model_performance_evaluation() -> dict:
+    def get_model_performance_evaluation(data: dict) -> dict:
         """
-        Loads the performance evaluation records from the JSON file and returns them.
+        Loads the performance evaluation records from the JSON file and processes them based on the requested metric.
+        For numeric metrics, this function groups all results by evaluation_date and averages the values across all fog nodes.
+        For "prediction_pairs", it filters the results for the provided edge_id per evaluation day.
         """
-        performance_records = CloudService.load_model_performance_from_json()
-        return {"performance_results": performance_records}
+        performance_records = CloudService.load_model_performance_from_json()  # List of evaluation records.
+        requested_metric = data.get("metric")
+        if not requested_metric:
+            return {"error": "No metric specified."}
+
+        if requested_metric != "prediction_pairs":
+            # Group numeric metric values by evaluation_date.
+            from collections import defaultdict
+            grouped_metrics = defaultdict(list)
+            for record in performance_records:
+                eval_date = record.get("evaluation_date")
+                results = record.get("results", [])
+                for res in results:
+                    metrics = res.get("metrics", {})
+                    if requested_metric in metrics:
+                        grouped_metrics[eval_date].append(metrics[requested_metric])
+            # Compute the daily average for each date.
+            daily_averages = []
+            for eval_date in sorted(grouped_metrics.keys()):
+                values = grouped_metrics[eval_date]
+                avg_value = sum(values) / len(values) if values else None
+                daily_averages.append({"evaluation_date": eval_date, "average": avg_value})
+            return {"performance_results": daily_averages}
+        else:
+            # Process prediction_pairs by filtering for the provided edge_id.
+            edge_id = data.get("edge_id")
+            if not edge_id:
+                return {"error": "No edge_id provided for prediction_pairs metric."}
+            filtered_results = {}
+            for record in performance_records:
+                eval_date = record.get("evaluation_date")
+                results = record.get("results", [])
+                # Find the record for the given edge_id in the day's results.
+                for res in results:
+                    if str(res.get("edge_id")) == str(edge_id):
+                        filtered_results[eval_date] = res.get("prediction_pairs", [])
+                        break  # Assume one entry per edge per day.
+            daily_results = [
+                {"evaluation_date": date, "prediction_pairs": filtered_results[date]}
+                for date in sorted(filtered_results.keys())
+            ]
+            return {"performance_results": daily_results}
+
+    @staticmethod
+    def get_available_performance_metrics():
+        """
+        Reads the received fog evaluation records (from fog nodes sent to cloud)
+        and determines which performance metrics are available. This includes keys
+        from the metrics dictionary (such as 'loss', 'mae', 'mse', 'rmse', 'r2')
+        as well as whether prediction pairs were provided.
+
+        Returns:
+            dict: A dictionary with a key 'available_metrics' whose value is a sorted list
+                  of unique metric names (and 'prediction_pairs' if available).
+        """
+        available_metrics = set()
+
+        # Iterate over all records received from fog nodes.
+        for record in CloudService.received_fog_results:
+            # Each record should have a "results" key which is a list of fog evaluation records.
+            fog_results = record.get("results", [])
+            for result in fog_results:
+                # Get the metrics dictionary from this fog result.
+                metrics = result.get("metrics", {})
+                # Add all keys from the metrics dictionary.
+                available_metrics.update(metrics.keys())
+                # Also check if there are prediction pairs.
+                if result.get("prediction_pairs") and len(result.get("prediction_pairs")) > 0:
+                    available_metrics.add("prediction_pairs")
+
+        # Convert the set to a sorted list for easier reading.
+        available_metrics = sorted(list(available_metrics))
+
+        return {"available_metrics": available_metrics}

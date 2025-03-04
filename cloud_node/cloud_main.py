@@ -32,8 +32,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     response = get_training_process_parameters()
                 elif operation == "perform_model_evaluation":
                     response = perform_model_evaluation(data)
+                elif operation == "get_available_performance_metrics":
+                    response = get_available_performance_metrics()
                 elif operation == "get_model_performance_evaluation":
-                    response = get_model_performance_evaluation()
+                    response = get_model_performance_evaluation(data)
                 else:
                     response = {"error": "Invalid operation"}
             except Exception as e:
@@ -119,7 +121,11 @@ def perform_model_evaluation(data):
     return {"message": "Model evaluation has been started."}
 
 
-def get_model_performance_evaluation():
-    return CloudService.get_model_performance_evaluation()
+def get_available_performance_metrics():
+    return CloudService.get_available_performance_metrics()
+
+
+def get_model_performance_evaluation(data):
+    return CloudService.get_model_performance_evaluation(data)
 
 

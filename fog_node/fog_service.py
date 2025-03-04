@@ -359,7 +359,9 @@ class FogService:
                             logger.info("Stopping queue listener as cooling process is complete.")
                             channel.stop_consuming()
                     elif message.get("scope") == ModelScope.EVALUATION.value:
-                        FogService.edge_evaluation_performances[message.get("edge_id")] = message.get("metrics")
+                        FogService.edge_evaluation_performances[message.get("edge_id")] = (message.get("metrics"),
+                                                                                           message
+                                                                                           .get("prediction_pairs"))
 
                         children_number = len(NodeState.get_current_node().child_nodes)
                         if len(FogService.edge_evaluation_performances) == children_number:
@@ -431,10 +433,11 @@ class FogService:
             logger.info("Running the sending of edge results to cloud.")
 
             results = []
-            for edge_id, metrics in FogService.edge_evaluation_performances.items():
+            for edge_id, (metrics, prediction_pairs) in FogService.edge_evaluation_performances.items():
                 results.append({
                     "edge_id": edge_id,
-                    "metrics": metrics
+                    "metrics": metrics,
+                    "prediction_pairs": prediction_pairs
                 })
             message = {
                 "scope": model_scope.value,
