@@ -14,6 +14,7 @@ from edge_node.model_manager import pretrain_edge_model, retrain_edge_model, eva
 from shared.monitoring_thread import MonitoringThread
 from shared.utils import delete_all_files_in_folder, publish_message
 from shared.logging_config import logger
+from shared.utils import metric_weights
 
 
 class EdgeService:
@@ -254,7 +255,7 @@ class EdgeService:
                 }
             else:
                 if scope == ModelScope.EVALUATION.value:
-                    metrics, prediction_pairs = evaluate_edge_model(edge_model_file_path, current_date, batch_size)
+                    metrics, prediction_pairs = evaluate_edge_model(edge_model_file_path, current_date)
                     response = {
                         "edge_id": NodeState.get_current_node().id,
                         "metrics": metrics,
@@ -268,19 +269,12 @@ class EdgeService:
                         edge_model_file_path, current_date,
                         learning_rate, batch_size, epochs, patience, fine_tune_layers
                     )
-                    weights = {
-                        "loss": 0.4,
-                        "mae": 0.3,
-                        "mse": 0.1,
-                        "rmse": 0.1,
-                        "r2": -0.1,
-                    }
 
                     def compute_weighted_score(metrics_for_score, weights_for_score):
                         return sum(weight * metrics_for_score[metric] for metric, weight in weights_for_score.items())
 
-                    score_before = compute_weighted_score(metrics["before_training"], weights)
-                    score_after = compute_weighted_score(metrics["after_training"], weights)
+                    score_before = compute_weighted_score(metrics["before_training"], metric_weights)
+                    score_after = compute_weighted_score(metrics["after_training"], metric_weights)
 
                     if score_after < score_before:
                         retrained_model_file_path = os.path.join(

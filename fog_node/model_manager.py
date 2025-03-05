@@ -11,6 +11,7 @@ from keras.src.losses import MeanSquaredError
 from shared.logging_config import logger
 from fog_node.fog_resources_paths import FogResourcesPaths
 from fog_node.fog_cooling_scheduler import FogCoolingScheduler
+from shared.utils import metric_weights
 
 
 def save_lambda_prev(lambda_prev) -> None:
@@ -40,14 +41,7 @@ def read_lambda_prev():
 
 def compute_weighted_score(metrics_for_score):
     score = 0
-    weights = {
-        "loss": 0.1,  # higher weight for loss
-        "mae": 0.3,  # medium weight for mae
-        "mse": 0.1,  # lower weight for mse since it's redundant loss
-        "rmse": 0.1,  # lower weight for rmse
-        "r2": -0.2,  # negative weight because higher r2 is better
-    }
-    for metric, weight in weights.items():
+    for metric, weight in metric_weights.items():
         score += weight * metrics_for_score[metric]
     return score
 
@@ -77,7 +71,11 @@ def compute_adaptive_weights(mu_new, mu_prev, recent_performance_factor):
 def execute_models_aggregation(fog_cooling_scheduler: FogCoolingScheduler, metrics):
     logger.info("Running the model aggregation in the fog node.")
 
-    custom_objects = {'mse': MeanSquaredError()}
+    custom_objects = {
+        "LogCosh": tf.keras.losses.LogCosh(),
+        "mse": tf.keras.losses.MeanSquaredError(),
+        "Huber": tf.keras.losses.Huber()
+    }
 
     edge_model_file_path = os.path.join(
         FogResourcesPaths.MODELS_FOLDER_PATH,
@@ -140,9 +138,9 @@ def softmax(values):
 def aggregate_models(edge_model_weights, fog_model_weights_list, mu_new, mu_prev, lambda_prev,
                      recent_performance_factor, before_training_score, after_training_score):
     # Compute adaptive weights using the new factor boost if needed
-    weights = compute_adaptive_weights(mu_new, mu_prev, recent_performance_factor)
-    mu_new_normalized = weights[0]
-    mu_prev_normalized = weights[1]
+    adaptive_weights = compute_adaptive_weights(mu_new, mu_prev, recent_performance_factor)
+    mu_new_normalized = adaptive_weights[0]
+    mu_prev_normalized = adaptive_weights[1]
 
     logger.info(f"Normalized weights -> mu_new: {mu_new_normalized}, mu_prev: {mu_prev_normalized}")
 

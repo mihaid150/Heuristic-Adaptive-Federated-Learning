@@ -255,8 +255,8 @@ class FogService:
             FogService.genetic_engine.evolve()
 
             # get top individuals for each fog child
-            trainable_edges = [node for node in NodeState.get_current_node().child_nodes if not node.is_evaluation_node]
-            top_individuals = FogService.genetic_engine.get_top_k_individuals(len(trainable_edges))
+            top_individuals = FogService.genetic_engine.get_top_k_individuals(len(NodeState.get_current_node()
+                                                                                  .child_nodes))
 
             FogService.fog_service_state = FogServiceState.TRAINING
             FogService.forward_model_to_edges(model_file_base64, start_date, current_date, is_cache_active,

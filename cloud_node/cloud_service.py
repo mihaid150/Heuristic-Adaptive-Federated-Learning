@@ -524,7 +524,7 @@ class CloudService:
         """
         Reads the received fog evaluation records (from fog nodes sent to cloud)
         and determines which performance metrics are available. This includes keys
-        from the metrics dictionary (such as 'loss', 'mae', 'mse', 'rmse', 'r2')
+        from the metrics dictionary
         as well as whether prediction pairs were provided.
 
         Returns:

@@ -4,7 +4,6 @@ import os
 
 import numpy as np
 import tensorflow as tf
-from keras.src.losses import MeanSquaredError
 
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
 from shared.shared_resources_paths import SharedResourcesPaths
@@ -29,7 +28,11 @@ def create_model(model_type):
 def aggregate_fog_models(received_fog_messages: dict):
     logger.info("Running model aggregation in cloud node.")
 
-    custom_objects = {'mse': MeanSquaredError()}
+    custom_objects = {
+        "LogCosh": tf.keras.losses.LogCosh(),
+        "mse": tf.keras.losses.MeanSquaredError(),
+        "Huber": tf.keras.losses.Huber()
+    }
     cloud_model_file_path = os.path.join(
         CloudResourcesPaths.MODELS_FOLDER_PATH,
         CloudResourcesPaths.CLOUD_MODEL_FILE_NAME

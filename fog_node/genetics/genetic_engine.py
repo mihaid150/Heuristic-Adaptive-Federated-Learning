@@ -6,7 +6,7 @@ import os
 import base64
 import json
 import time
-from typing import Any, List
+from typing import Any
 
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -17,6 +17,7 @@ from shared.logging_config import logger
 from fog_node.fog_resources_paths import FogResourcesPaths
 from shared.shared_resources_paths import SharedResourcesPaths
 from shared.fed_node.fed_node import ModelScope
+from shared.utils import metric_weights
 
 
 class FitnessMin(base.Fitness):
@@ -76,8 +77,8 @@ class GeneticEngine:
         Initializes the Genetic Engine
         """
         # initialization with default values until update
-        self.population_size = 3
-        self.number_of_generations = 2
+        self.population_size = 6
+        self.number_of_generations = 4
         self.stagnation_limit = 2
 
         self.toolbox: Any = base.Toolbox()
@@ -106,10 +107,10 @@ class GeneticEngine:
                                                          FogResourcesPaths.GENETIC_POPULATION_FILE_NAME)
 
         self.learning_rate_bound = (1, 100)
-        self.batch_size_bound = (16, 128)
-        self.epochs_bound = (1, 10)
-        self.patience_bound = (1, 20)
-        self.fine_tune_layers_bound = (1, 10)
+        self.batch_size_bound = (96, 128)
+        self.epochs_bound = (10, 20)
+        self.patience_bound = (5, 10)
+        self.fine_tune_layers_bound = (1, 3)
 
     def configure_training_parameters_bounds(self, lr_min, lr_max, bs_min, bs_max, ep_min, ep_max, pa_min, pa_max,
                                              ftl_min, ftl_max):
@@ -321,16 +322,14 @@ class GeneticEngine:
                 except Exception as e:
                     logger.error("Exception while processing response from node %s: %s", node.id, e)
 
-        weights = {"loss": 0.4, "mae": 0.3, "mse": 0.1, "rmse": 0.1, "r2": -0.1}
-
         def compute_weighted_score(metrics, local_weights):
             return sum(local_weights[metric] * metrics[metric] for metric in local_weights)
 
         scores = []
         for resp in valid_responses:
             try:
-                score_before = compute_weighted_score(resp["metrics"]["before_training"], weights)
-                score_after = compute_weighted_score(resp["metrics"]["after_training"], weights)
+                score_before = compute_weighted_score(resp["metrics"]["before_training"], metric_weights)
+                score_after = compute_weighted_score(resp["metrics"]["after_training"], metric_weights)
                 score = min(score_before, score_after)
                 scores.append(score)
                 logger.info("Computed score for response: before=%s, after=%s, chosen=%s", score_before, score_after,
