@@ -6,6 +6,7 @@ import os
 import threading
 import time
 from enum import Enum
+from typing import Dict, Any
 
 import pika
 from pika.exceptions import AMQPConnectionError
@@ -18,7 +19,7 @@ from shared.monitoring_thread import MonitoringThread
 from shared.shared_resources_paths import SharedResourcesPaths
 from shared.utils import delete_all_files_in_folder
 from shared.logging_config import logger
-from shared.fed_node.fed_node import ModelScope
+from shared.fed_node.fed_node import MessageScope
 
 
 class FogServiceState(Enum):
@@ -44,6 +45,7 @@ class FogService:
     fog_service_state = FogServiceState.IDLE
 
     edge_evaluation_performances = {}
+    edge_responses_counter = 0
 
     @staticmethod
     def get_fog_service_state():
@@ -181,11 +183,16 @@ class FogService:
                         else:
                             logger.error("Fog cooling scheduler is not initialized.")
 
-                        if scope == ModelScope.TRAINING.value:
+                        if scope == MessageScope.TRAINING.value:
                             FogService.orchestrate_training(message)
-                        elif scope == ModelScope.EVALUATION.value:
+                        elif scope == MessageScope.EVALUATION.value:
                             FogService.edge_evaluation_performances = {}
                             FogService.orchestrate_evaluation(message)
+                        elif scope == MessageScope.TEST_DATA_ENOUGH_EXISTS.value:
+                            FogService.edge_responses_counter = 0
+                            FogService.orchestrate_enough_data_testing(message)
+                        elif scope == MessageScope.GENETIC_LOGBOOK.value:
+                            FogService.send_fog_model_to_cloud(MessageScope.GENETIC_LOGBOOK, None)
                         else:
                             logger.warning(f"There was met a an unknown scope of the model {scope}.")
                     except Exception as e1:
@@ -253,15 +260,12 @@ class FogService:
                 FogService.genetic_engine.set_operating_data_date([current_date])
             FogService.fog_service_state = FogServiceState.GENETIC_EVALUATION
             FogService.genetic_engine.evolve()
-
             # get top individuals for each fog child
             top_individuals = FogService.genetic_engine.get_top_k_individuals(len(NodeState.get_current_node()
                                                                                   .child_nodes))
-
             FogService.fog_service_state = FogServiceState.TRAINING
             FogService.forward_model_to_edges(model_file_base64, start_date, current_date, is_cache_active,
                                               genetic_evaluation_strategy, model_type, top_individuals)
-
             FogService.genetic_engine.save_population_to_json()
 
         except Exception as e:
@@ -286,11 +290,15 @@ class FogService:
             raise ValueError("Current fog node is not initialized.")
 
         trainable_edges = NodeState.get_current_node().child_nodes
+
+        logger.info(f"Forwarding the model and parameters to {len(trainable_edges)}.")
+        logger.info(top_individuals)
+
         for index, edge_node in enumerate(trainable_edges):
             individual = top_individuals[index]
             message = {
                 "child_id": edge_node.id,
-                "scope": ModelScope.TRAINING.value,
+                "scope": MessageScope.TRAINING.value,
                 "genetic_evaluation": False,
                 "start_date": start_date,
                 "current_date": current_date,
@@ -337,7 +345,7 @@ class FogService:
                     """
                     message = json.loads(body.decode('utf-8'))
 
-                    if message.get("scope") == ModelScope.TRAINING.value:
+                    if message.get("scope") == MessageScope.TRAINING.value:
                         FogService.fog_cooling_scheduler.increment_stopping_score()
                         FogService.get_edge_model(message)
                         FogService.fog_cooling_scheduler.has_reached_stopping_condition_for_cooler()
@@ -345,7 +353,7 @@ class FogService:
                         if not FogService.fog_cooling_scheduler.is_fog_cooling_operational():
                             logger.info("Stopping queue listener as cooling process is complete.")
                             channel.stop_consuming()
-                    elif message.get("scope") == ModelScope.EVALUATION.value:
+                    elif message.get("scope") == MessageScope.EVALUATION.value:
                         FogService.edge_evaluation_performances[message.get("edge_id")] = (message.get("metrics"),
                                                                                            message
                                                                                            .get("prediction_pairs"))
@@ -354,7 +362,31 @@ class FogService:
                         if len(FogService.edge_evaluation_performances) == children_number:
                             logger.info("Stopping queue listener as receiving evaluation metrics process is complete.")
                             channel.stop_consuming()
-                            FogService.send_fog_model_to_cloud(ModelScope.EVALUATION, message.get("evaluation_date"))
+                            params = {
+                                "evaluation_date": message.get("evaluation_date"),
+                            }
+                            FogService.send_fog_model_to_cloud(MessageScope.EVALUATION, params)
+                    elif message.get("scope") == MessageScope.TEST_DATA_ENOUGH_EXISTS.value:
+                        if message.get("enough_data_existence"):
+                            FogService.edge_responses_counter += 1
+                        else:
+                            logger.info("Stopping queue listener as receiving not enough data existence process is "
+                                        "complete.")
+                            channel.stop_consuming()
+                            params = {
+                                "enough_data_existence": False
+                            }
+                            FogService.send_fog_model_to_cloud(MessageScope.TEST_DATA_ENOUGH_EXISTS, params)
+
+                        children_number = len(NodeState.get_current_node().child_nodes)
+                        if FogService.edge_responses_counter == children_number:
+                            logger.info("Stopping queue listener as receiving enough data existence process is "
+                                        "complete.")
+                            channel.stop_consuming()
+                            params = {
+                                "enough_data_existence": True
+                            }
+                            FogService.send_fog_model_to_cloud(MessageScope.TEST_DATA_ENOUGH_EXISTS, params)
 
                 logger.info("Listening for messages from edge nodes...")
                 channel.basic_consume(queue=FogService.EDGE_FOG_RECEIVE_QUEUE, on_message_callback=callback,
@@ -400,8 +432,9 @@ class FogService:
         delete_all_files_in_folder(FogResourcesPaths.MODELS_FOLDER_PATH, filter_string="edge")
 
     @staticmethod
-    def send_fog_model_to_cloud(model_scope: ModelScope, evaluation_date: str = None):
-        if model_scope.value == ModelScope.TRAINING.value:
+    def send_fog_model_to_cloud(model_scope: MessageScope, params):
+        message = None
+        if model_scope.value == MessageScope.TRAINING.value:
             logger.info("Running the sending of the fog model to cloud.")
 
             fog_model_file_path = os.path.join(FogResourcesPaths.MODELS_FOLDER_PATH,
@@ -416,7 +449,7 @@ class FogService:
                 "lambda_prev": read_lambda_prev(),
                 "model_file": model_file_base64
             }
-        else:
+        elif model_scope.value == MessageScope.EVALUATION.value:
             logger.info("Running the sending of edge results to cloud.")
 
             results = []
@@ -430,8 +463,17 @@ class FogService:
                 "scope": model_scope.value,
                 "fog_id": NodeState.get_current_node().id,
                 "results": results,
-                "evaluation_date": evaluation_date
+                "evaluation_date": params.get("evaluation_date")
             }
+        elif model_scope.value == MessageScope.TEST_DATA_ENOUGH_EXISTS.value:
+            logger.info("Running the sending of the edge enough data confirmation to cloud.")
+            message = {
+                "scope": MessageScope.TEST_DATA_ENOUGH_EXISTS.value,
+                "enough_data_existence": params.get("enough_data_existence")
+            }
+        elif model_scope.value == MessageScope.GENETIC_LOGBOOK.value:
+            logger.info("Running sending the genetic logbook to cloud.")
+            message = FogService.get_genetic_logbook()
 
         published = False
         while not published:
@@ -449,7 +491,7 @@ class FogService:
                 connection.close()
                 published = True
 
-                if model_scope.value == ModelScope.TRAINING.value:
+                if model_scope.value == MessageScope.TRAINING.value:
                     logger.info("Fog has sent fog model to cloud node.")
                 else:
                     logger.info("Fog has sent edge results to cloud node.")
@@ -466,8 +508,9 @@ class FogService:
     @staticmethod
     def orchestrate_evaluation(message):
         try:
+            logger.info("step1")
             model_file_base64 = message.get("model_file")
-
+            logger.info("step2")
             if not model_file_base64:
                 raise ValueError("Model file is missing in the received message.")
 
@@ -478,18 +521,18 @@ class FogService:
                 )
             )
             channel = connection.channel()
-
+            logger.info("step3")
             current_node = NodeState.get_current_node()
             if not current_node:
                 raise ValueError("Current fog node is not initialized.")
 
             if FogService.genetic_engine.current_population is None:
                 FogService.genetic_engine.load_population_from_json()
-
+            logger.info("step4")
             # TODO: update such that if not enough individuals to add some random
             top_individuals = FogService.genetic_engine.get_top_k_individuals(len(NodeState.get_current_node()
                                                                                   .child_nodes))
-
+            logger.info("step5")
             logger.info(top_individuals)
 
             for index, edge_node in enumerate(current_node.child_nodes):
@@ -510,3 +553,50 @@ class FogService:
             # TODO: implement on edge the receiving, evaluation and send back of the result
         except Exception as e:
             logger.warning(f"An error occurred during orchestration evaluation: {e}")
+
+    @staticmethod
+    def orchestrate_enough_data_testing(message):
+        try:
+            connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=FogService.FOG_RABBITMQ_HOST,
+                    heartbeat=30
+                )
+            )
+            channel = connection.channel()
+
+            current_node = NodeState.get_current_node()
+            if not current_node:
+                raise ValueError("Current fog node is not initialized.")
+
+            for index, edge_node in enumerate(current_node.child_nodes):
+                routing_key = str(edge_node.id)
+                channel.basic_publish(exchange=FogService.FOG_EDGE_SEND_EXCHANGE, routing_key=routing_key,
+                                      body=json.dumps(message))
+                logger.info(f"Forwarded enough data tes to edge {edge_node.name} ({edge_node.ip_address}:"
+                            f"{edge_node.port})")
+
+            connection.close()
+        except Exception as e:
+            logger.warning(f"An error occurred during orchestration evaluation: {e}")
+
+    @staticmethod
+    def get_genetic_logbook() -> Dict[str, Any]:
+        """
+        Returns all logbook records (i.e. statistics for each generation)
+        from the current evolution iteration of the genetic engine as a JSON-compatible dictionary.
+        If the logbook is empty, it attempts to load it from the saved file.
+        """
+        if not FogService.genetic_engine.logbook or len(FogService.genetic_engine.logbook) == 0:
+            logger.info("Genetic logbook is empty, attempting to load from saved file...")
+            FogService.genetic_engine.load_population_from_json()
+
+        # Instead of returning just the latest record, return all records from the current evolution iteration.
+        return {
+            "header": FogService.genetic_engine.DEFAULT_LOGBOOK_HEADER,
+            "records": FogService.genetic_engine.logbook,
+            "fog_id": NodeState.get_current_node().id,
+            "scope": MessageScope.GENETIC_LOGBOOK.value
+        }
+
+
