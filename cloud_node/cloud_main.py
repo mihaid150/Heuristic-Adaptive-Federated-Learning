@@ -1,9 +1,10 @@
 # cloudnode/cloud_main.py
-
+import asyncio
 from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from cloud_node.cloud_service import CloudService
 from shared.logging_config import logger
+from shared.fed_node.fed_node import MessageScope
 
 cloud_router = APIRouter()
 
@@ -11,11 +12,18 @@ cloud_router = APIRouter()
 @cloud_router.websocket('/ws')
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    CloudService.websocket_connection = websocket
+    CloudService.websocket_loop = asyncio.get_running_loop()
     try:
         while True:
             message: Dict[str, Any] = await websocket.receive_json()
             operation: str = message.get('operation')
+
+            if not operation:
+                continue
             data: Dict[str, Any] = message.get('data', {})
+
+            logger.info(f"Message: {message}")
 
             try:
                 if operation == "get_cloud_status":
@@ -36,6 +44,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     response = get_available_performance_metrics()
                 elif operation == "get_model_performance_evaluation":
                     response = get_model_performance_evaluation(data)
+                elif operation == "clear_cloud_results":
+                    response = clear_cloud_results()
+                elif operation == "record_nodes_to_cloud_db":
+                    response = record_nodes_to_cloud_db(data)
+                elif operation == "update_node_records_and_relink_ids":
+                    response = update_node_records_and_relink_ids(data)
                 else:
                     response = {"error": "Invalid operation"}
             except Exception as e:
@@ -44,6 +58,8 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json(response)
     except WebSocketDisconnect:
         logger.warning("WebSocket disconnected.")
+    # finally:
+    #     CloudService.websocket_connection = None
 
 
 def get_cloud_status():
@@ -74,13 +90,7 @@ def init_pretraining_process(data):
                     f"{data.get('end_date')}, is_cache_active: {data.get('is_cache_active')}, "
                     f"genetic evaluation strategy: {data.get('genetic_evaluation_strategy')}, model type: "
                     f"{data.get('model_type')}")
-        CloudService.execute_training_process(
-            data.get("start_date"),
-            data.get("end_date"),
-            data.get("is_cache_active"),
-            data.get("genetic_evaluation_strategy"),
-            data.get("model_type")
-        )
+        CloudService.check_enough_data_existence(data, MessageScope.TRAINING)
         return {
             "message": "Cloud pretraining process has been started."
         }
@@ -98,13 +108,7 @@ def init_periodical_process(data):
                     f"{data.get('end_date')}, is_cache_active: {data.get('is_cache_active')}, "
                     f"genetic evaluation strategy: {data.get('genetic_evaluation_strategy')}, model type: "
                     f"{data.get('model_type')}")
-        CloudService.execute_training_process(
-            None,
-            data.get("end_date"),
-            data.get("is_cache_active"),
-            data.get("genetic_evaluation_strategy"),
-            data.get("model_type")
-        )
+        CloudService.check_enough_data_existence(data, MessageScope.TRAINING)
         return {
             "message": "Cloud periodical process has been started."
         }
@@ -117,7 +121,7 @@ def init_periodical_process(data):
 
 
 def perform_model_evaluation(data):
-    CloudService.perform_model_evaluation(data.get("end_date"))
+    CloudService.check_enough_data_existence(data, MessageScope.EVALUATION)
     return {"message": "Model evaluation has been started."}
 
 
@@ -129,3 +133,13 @@ def get_model_performance_evaluation(data):
     return CloudService.get_model_performance_evaluation(data)
 
 
+def clear_cloud_results():
+    return CloudService.clear_cloud_results()
+
+
+def record_nodes_to_cloud_db(data):
+    return CloudService.save_nodes_record_to_db(data)
+
+
+def update_node_records_and_relink_ids(data):
+    return CloudService.update_node_records_and_relink_ids(data)

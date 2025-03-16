@@ -1,14 +1,17 @@
+import asyncio
 import base64
 import json
+import math
 import os
 import time
 import threading
 from enum import Enum
+from typing import Dict, Any
 
 import pika
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
-from shared.fed_node.fed_node import ModelScope
+from shared.fed_node.fed_node import MessageScope
 from shared.shared_resources_paths import SharedResourcesPaths
 from cloud_node.model_manager import create_model, aggregate_fog_models
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
@@ -16,6 +19,10 @@ from cloud_node.cloud_cooling_scheduler import CloudCoolingScheduler
 from shared.utils import delete_all_files_in_folder
 from shared.monitoring_thread import MonitoringThread
 from shared.logging_config import logger
+from cloud_node.db_manager import (save_node_record_to_db, save_genetic_results_to_db, save_performance_results_to_db,
+                                   clear_all_data, save_prediction_results_to_db, load_prediction_results_from_db,
+                                   load_performance_results_from_db, load_genetic_results_from_db, init_db,
+                                   update_node_records_and_relink_ids)
 
 
 class CloudServiceState(Enum):
@@ -36,7 +43,9 @@ class CloudService:
 
     cloud_cooling_scheduler = CloudCoolingScheduler()
     received_fog_messages = {}
-    received_fog_results = []
+    received_fog_performance_results_metrics = []
+    received_fog_performance_results_predictions = []
+    received_fog_performance_genetic_results = []
     evaluation_received_results_counter = 0
     rabbitmq_init_monitor_thread = None
     fog_models_listener_thread = None
@@ -46,9 +55,14 @@ class CloudService:
     model_type = None
     start_date = None
     current_date = None
+    current_working_date = None
 
     cloud_service_state = CloudServiceState.IDLE
     federated_simulation_state = FederatedSimulationState.IDLE
+
+    buffer = None
+    websocket_connection = None
+    websocket_loop = None
 
     @staticmethod
     def get_cloud_service_state():
@@ -90,6 +104,7 @@ class CloudService:
                     logger.info(f"Cloud node detected: {current_node.name}.")
                     CloudService.CLOUD_RABBITMQ_HOST = current_node.ip_address
                     CloudService.init_rabbitmq()
+                    init_db()
                     if CloudService.rabbitmq_init_monitor_thread:
                         CloudService.rabbitmq_init_monitor_thread.stop()
                     break  # Exit the loop after successful initialization
@@ -109,10 +124,12 @@ class CloudService:
         """
         if CloudService.fog_models_listener_thread is not None and CloudService.fog_models_listener_thread.is_alive():
             logger.info("Stopping current fog models listener thread...")
-            # We assume that the listener thread exits when the cooling process stops.
-            # Here we force-stop by joining with a timeout.
             try:
-                CloudService.fog_models_listener_thread.join(timeout=5)
+                # Only join if the listener thread is not the current thread.
+                if CloudService.fog_models_listener_thread != threading.current_thread():
+                    CloudService.fog_models_listener_thread.join(timeout=5)
+                else:
+                    logger.warning("Attempted to join the current thread; skipping join.")
             except Exception as e:
                 logger.error(f"Error while stopping fog models listener thread: {e}")
             CloudService.fog_models_listener_thread = None
@@ -187,14 +204,6 @@ class CloudService:
             cloud_model = create_model(model_type)
             cloud_model.save(cloud_model_file_path)
 
-            # delete the model performance json from the previous simulation
-            model_performance_file_path = os.path.join(SharedResourcesPaths.CACHE_FOLDER_PATH,
-                                                       CloudResourcesPaths.MODEL_PERFORMANCE_RESULTS_FILE_NAME)
-
-            if os.path.exists(model_performance_file_path):
-                delete_all_files_in_folder(SharedResourcesPaths.CACHE_FOLDER_PATH, 'model_performance')
-
-            CloudService.received_fog_results = []
         else:
             CloudService.federated_simulation_state = FederatedSimulationState.TRAINING
 
@@ -222,7 +231,7 @@ class CloudService:
             "genetic_evaluation_strategy": genetic_evaluation_strategy,
             "model_type": model_type,
             "model_file": encoded_model,
-            "scope": ModelScope.TRAINING.value
+            "scope": MessageScope.TRAINING.value
         }
 
         CloudService.cloud_cooling_scheduler.start_cooling()
@@ -266,6 +275,8 @@ class CloudService:
                 aggregate_fog_models(CloudService.received_fog_messages)
                 delete_all_files_in_folder(CloudResourcesPaths.MODELS_FOLDER_PATH, filter_string="fog")
                 CloudService.cloud_service_state = CloudServiceState.IDLE
+                CloudService.send_status_update("success", "Finished aggregating cloud model.")
+                CloudService.get_fog_genetic_results()
                 return
 
             child_id = message.get("fog_id")
@@ -307,6 +318,9 @@ class CloudService:
             # Delete the received fog model files (keeping only the cloud model)
             delete_all_files_in_folder(CloudResourcesPaths.MODELS_FOLDER_PATH, filter_string="fog")
             CloudService.cloud_service_state = CloudServiceState.IDLE
+            CloudService.send_status_update("success", "Finished aggregating cloud model.")
+            logger.info("Finished aggregating cloud model.")
+            CloudService.get_fog_genetic_results()
 
     @staticmethod
     def listen_to_receive_fog_queue():
@@ -325,15 +339,19 @@ class CloudService:
 
                 def callback(ch, _method, _properties, body):
                     message = json.loads(body.decode('utf-8'))
-
-                    if int(message.get("scope")) == ModelScope.TRAINING.value:
+                    # logger.info(f"Received message from fog: {message}")
+                    if int(message.get("scope")) == MessageScope.TRAINING.value:
                         CloudService.get_fog_model(message)
                         # check if cooling has stopped
                         if not CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
                             logger.info("Stopping queue listener as cooling process is complete.")
                             ch.stop_consuming()
-                    elif int(message.get("scope")) == ModelScope.EVALUATION.value:
+                    elif int(message.get("scope")) == MessageScope.EVALUATION.value:
                         CloudService.get_fog_evaluation_results(message)
+                    elif int(message.get("scope")) == MessageScope.TEST_DATA_ENOUGH_EXISTS.value:
+                        CloudService.get_fog_test_result(message)
+                    elif int(message.get("scope")) == MessageScope.GENETIC_LOGBOOK.value:
+                        CloudService.get_fog_genetic_result(message)
                     else:
                         logger.warning(f"Received message from fog with scope {message.get('scope')} being not "
                                        f"recognized.")
@@ -389,7 +407,7 @@ class CloudService:
             "start_date": None,
             "current_date": evaluation_date,
             "model_file": encoded_model,
-            "scope": ModelScope.EVALUATION.value
+            "scope": MessageScope.EVALUATION.value
         }
 
         CloudService.start_listener()
@@ -402,151 +420,334 @@ class CloudService:
         results = message.get("results", [])
         evaluation_date = message.get("evaluation_date")
 
-        # Create a new record for this fog's evaluation and append it to the list.
-        record = {
+        # Separate out metrics and prediction pairs from the received results.
+        metrics_records = []
+        predictions_records = []
+        for res in results:
+            # If the result contains numeric metrics, save that record.
+            if "metrics" in res:
+                metrics_records.append({
+                    "edge_id": res.get("edge_id"),
+                    "metrics": res["metrics"],
+                    "evaluation_date": evaluation_date
+                })
+            # If the result contains prediction pairs, save that record.
+            if "prediction_pairs" in res:
+                predictions_records.append({
+                    "edge_id": res.get("edge_id"),
+                    "prediction_pairs": res["prediction_pairs"],
+                    "evaluation_date": evaluation_date
+                })
+
+        CloudService.received_fog_performance_results_metrics.append({
             "fog_id": fog_id,
-            "results": results,
+            "results": metrics_records,
             "evaluation_date": evaluation_date
-        }
-        CloudService.received_fog_results.append(record)
+        })
+        CloudService.received_fog_performance_results_predictions.append({
+            "fog_id": fog_id,
+            "results": predictions_records,
+            "evaluation_date": evaluation_date
+        })
+
         CloudService.evaluation_received_results_counter += 1
 
-        # When results from all fog nodes have been received, finalize and save the performance data.
+        # Once we've received results from all fog nodes...
         if CloudService.evaluation_received_results_counter == len(NodeState.get_current_node().child_nodes):
             CloudService.cloud_service_state = CloudServiceState.IDLE
-            CloudService.save_model_performance_to_json()
 
-    @staticmethod
-    def load_model_performance_from_json() -> list:
-        """
-        Load the model performance results from the JSON file.
-        Returns a list of performance records (each a dict) if the file exists, or an empty list.
-        """
-        model_performance_file_path = os.path.join(
-            SharedResourcesPaths.CACHE_FOLDER_PATH,
-            CloudResourcesPaths.MODEL_PERFORMANCE_RESULTS_FILE_NAME
-        )
-        if os.path.exists(model_performance_file_path):
-            try:
-                with open(model_performance_file_path, "r") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        logger.info(f"Loaded {len(data)} existing performance records.")
-                        return data
-                    else:
-                        logger.warning("Performance file format unexpected; starting with empty list.")
-                        return []
-            except Exception as e:
-                logger.error(f"Error loading model performance file: {e}")
-                return []
-        else:
-            return []
-
-    @staticmethod
-    def save_model_performance_to_json() -> None:
-        """
-        Append the new evaluation records from CloudService.received_fog_results to the existing
-        performance data stored in the JSON file.
-        """
-        model_performance_file_path = os.path.join(
-            SharedResourcesPaths.CACHE_FOLDER_PATH,
-            CloudResourcesPaths.MODEL_PERFORMANCE_RESULTS_FILE_NAME
-        )
-        # Load any existing data (a list of records)
-        existing_data = CloudService.load_model_performance_from_json()
-        # Assume that for evaluation we store a list of records.
-        # CloudService.received_fog_results should be a list of new records for the current evaluation round.
-        if not isinstance(CloudService.received_fog_results, list):
-            logger.error("CloudService.received_fog_results is not a list; cannot save performance results.")
-            return
-        # Combine the old and new records
-        combined_data = existing_data + CloudService.received_fog_results
-        try:
-            with open(model_performance_file_path, "w") as f:
-                json.dump(combined_data, f, indent=2)
-            logger.info(f"Saved {len(CloudService.received_fog_results)} new performance records, "
-                        f"total now {len(combined_data)}.")
-        except Exception as e:
-            logger.error(f"Error saving model performance file: {e}")
+            # Instead of saving JSON, use the DB manager to save the results.
+            save_performance_results_to_db(CloudService.current_working_date,
+                                           CloudService.received_fog_performance_results_metrics)
+            save_prediction_results_to_db(CloudService.current_working_date,
+                                          CloudService.received_fog_performance_results_predictions)
+            # For genetic results, JSON was used only for sending to the frontend.
+            # You might want to call save_genetic_results_to_db similarly if needed.
+            CloudService.send_status_update("success", "Finished evaluating cloud model.", 1)
 
     @staticmethod
     def get_model_performance_evaluation(data: dict) -> dict:
-        """
-        Loads the performance evaluation records from the JSON file and processes them based on the requested metric.
-        For numeric metrics, this function groups all results by evaluation_date and averages the values across all fog nodes.
-        For "prediction_pairs", it filters the results for the provided edge_id per evaluation day.
-        """
-        performance_records = CloudService.load_model_performance_from_json()  # List of evaluation records.
-        requested_metric = data.get("metric")
-        if not requested_metric:
-            return {"error": "No metric specified."}
 
-        if requested_metric != "prediction_pairs":
-            # Group numeric metric values by evaluation_date.
+        metric = data.get("metric")
+        metric_type = int(data.get("metric_type"))
+
+        # --- Case 1: Prediction Metrics ---
+        if metric_type == 2:
+            prediction_results = load_prediction_results_from_db()
+
+            edge_id = data.get("edge_id")
+            if not edge_id:
+                return {"error": "No edge_id provided for prediction metric."}
+
+            edge_id_str = str(edge_id)
+            filtered_results = {}
+            if isinstance(prediction_results, dict):
+                for eval_date, group in prediction_results.items():
+                    for record in group.get("prediction_results", []):
+                        if str(record.get("edge_id")) == edge_id_str:
+                            current_date = record.get("evaluation_date", eval_date)
+                            filtered_results.setdefault(current_date, []).extend(record.get("prediction_pairs", []))
+            else:
+                return {"error": "Unexpected data structure for prediction results."}
+
+            daily_results = [
+                {"evaluation_date": date, "prediction_pairs": filtered_results[date]}
+                for date in sorted(filtered_results.keys())
+            ]
+            result = {"prediction_results": daily_results}
+            return result
+
+        # --- Case 2: Genetic Metrics ---
+        elif metric_type == 3:
+            genetic_results = load_genetic_results_from_db()
+            filter_fog_id = data.get("fog_id")
+            aggregated_genetic = {}
+
+            if isinstance(genetic_results, dict):
+                for eval_date, group in genetic_results.items():
+                    for record in group.get("genetic_results", []):
+                        if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                            continue
+                        current_date = record.get("evaluation_date", eval_date)
+                        if not current_date:
+                            continue
+                        aggregated_genetic.setdefault(current_date, {})
+                        for rec in record.get("records", []):
+                            gen_number = rec.get("gen")
+                            if metric in rec and isinstance(rec[metric], (int, float)) and math.isfinite(rec[metric]):
+                                aggregated_genetic[current_date][gen_number] = rec[metric]
+
+            elif isinstance(genetic_results, list):
+                for record in genetic_results:
+                    if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                        continue
+                    eval_date = record.get("evaluation_date")
+                    if not eval_date:
+                        continue
+                    aggregated_genetic.setdefault(eval_date, {})
+                    for rec in record.get("records", []):
+                        gen_number = rec.get("gen")
+                        if metric in rec and isinstance(rec[metric], (int, float)) and math.isfinite(rec[metric]):
+                            aggregated_genetic[eval_date][gen_number] = rec[metric]
+            else:
+                return {"error": "Genetic results have an unrecognized structure."}
+
+            # Build output for every evaluation date.
+            aggregated_list = []
+            for date in sorted(aggregated_genetic.keys()):
+                generations = [
+                    {"gen": gen, "value": aggregated_genetic[date][gen]}
+                    for gen in sorted(aggregated_genetic[date].keys())
+                ]
+                aggregated_list.append({"evaluation_date": date, "generations": generations})
+            result = {"genetic_results": aggregated_list, "selected_metric": metric}
+            return result
+
+        # --- Case 3: Numeric (Model Performance) Metrics ---
+        else:
+            performance_results = load_performance_results_from_db()
             from collections import defaultdict
             grouped_metrics = defaultdict(list)
-            for record in performance_records:
-                eval_date = record.get("evaluation_date")
-                results = record.get("results", [])
-                for res in results:
-                    metrics = res.get("metrics", {})
-                    if requested_metric in metrics:
-                        grouped_metrics[eval_date].append(metrics[requested_metric])
-            # Compute the daily average for each date.
+
+            if isinstance(performance_results, dict):
+                for eval_date, rec_list in performance_results.items():
+                    for record in rec_list.get("performance_results", []):
+                        for res in record.get("results", []):
+                            metrics = res.get("metrics", {})
+                            if metric in metrics and isinstance(metrics[metric], (int, float)):
+                                grouped_metrics[eval_date].append(metrics[metric])
+            else:
+                return {"error": "Performance results have an unrecognized structure."}
+
             daily_averages = []
             for eval_date in sorted(grouped_metrics.keys()):
                 values = grouped_metrics[eval_date]
                 avg_value = sum(values) / len(values) if values else None
                 daily_averages.append({"evaluation_date": eval_date, "average": avg_value})
-            return {"performance_results": daily_averages}
-        else:
-            # Process prediction_pairs by filtering for the provided edge_id.
-            edge_id = data.get("edge_id")
-            if not edge_id:
-                return {"error": "No edge_id provided for prediction_pairs metric."}
-            filtered_results = {}
-            for record in performance_records:
-                eval_date = record.get("evaluation_date")
-                results = record.get("results", [])
-                # Find the record for the given edge_id in the day's results.
-                for res in results:
-                    if str(res.get("edge_id")) == str(edge_id):
-                        filtered_results[eval_date] = res.get("prediction_pairs", [])
-                        break  # Assume one entry per edge per day.
-            daily_results = [
-                {"evaluation_date": date, "prediction_pairs": filtered_results[date]}
-                for date in sorted(filtered_results.keys())
-            ]
-            return {"performance_results": daily_results}
+            result = {"performance_results": daily_averages}
+            return result
 
     @staticmethod
-    def get_available_performance_metrics():
+    def get_available_performance_metrics() -> Dict[str, Any]:
         """
-        Reads the received fog evaluation records (from fog nodes sent to cloud)
-        and determines which performance metrics are available. This includes keys
-        from the metrics dictionary
-        as well as whether prediction pairs were provided.
-
-        Returns:
-            dict: A dictionary with a key 'available_metrics' whose value is a sorted list
-                  of unique metric names (and 'prediction_pairs' if available).
+        Returns available performance metrics based on data stored in the database.
+        Uses the DB load functions and returns a dictionary with three keys:
+          - "model_performance_metrics"
+          - "prediction_metrics"
+          - "genetic_metrics"
         """
-        available_metrics = set()
+        # Load data from the database.
+        performance_results = load_performance_results_from_db()
+        prediction_results = load_prediction_results_from_db()
+        genetic_results = load_genetic_results_from_db()
 
-        # Iterate over all records received from fog nodes.
-        for record in CloudService.received_fog_results:
-            # Each record should have a "results" key which is a list of fog evaluation records.
-            fog_results = record.get("results", [])
-            for result in fog_results:
-                # Get the metrics dictionary from this fog result.
-                metrics = result.get("metrics", {})
-                # Add all keys from the metrics dictionary.
-                available_metrics.update(metrics.keys())
-                # Also check if there are prediction pairs.
-                if result.get("prediction_pairs") and len(result.get("prediction_pairs")) > 0:
-                    available_metrics.add("prediction_pairs")
+        # Gather numeric performance metrics.
+        model_performance_metrics = set()
+        # performance_results is a dict keyed by evaluation_date.
+        for date, group in performance_results.items():
+            # Each group should contain a "performance_results" key with a list of records.
+            for record in group.get("performance_results", []):
+                # Each record contains "results": a list of entries.
+                for res in record.get("results", []):
+                    metrics = res.get("metrics", {})
+                    model_performance_metrics.update(metrics.keys())
 
-        # Convert the set to a sorted list for easier reading.
-        available_metrics = sorted(list(available_metrics))
+        # Gather prediction metrics.
+        # In our DB schema, prediction results always store a "prediction_pairs" key.
+        prediction_metrics = set()
+        for date, group in prediction_results.items():
+            for record in group.get("prediction_results", []):
+                if record.get("prediction_pairs") and len(record.get("prediction_pairs")) > 0:
+                    prediction_metrics.add("prediction_pairs")
 
-        return {"available_metrics": available_metrics}
+        # Gather genetic metrics.
+        # "nevals", "avg", "std", "min", "max", "genotypic_diversity", "phenotypic_diversity"
+        genetic_metrics = set()
+        for date, group in genetic_results.items():
+            for record in group.get("genetic_results", []):
+                # Each record should have a "records" key with a list of generation dictionaries.
+                for rec in record.get("records", []):
+                    for key in rec.keys():
+                        if key != "gen":  # We consider "gen" as an index; other keys are metric names.
+                            genetic_metrics.add(key)
+
+        return {
+            "model_performance_metrics": sorted(list(model_performance_metrics)),
+            "prediction_metrics": sorted(list(prediction_metrics)),
+            "genetic_metrics": sorted(list(genetic_metrics))
+        }
+
+    @staticmethod
+    def check_enough_data_existence(data, scope: MessageScope):
+        CloudService.cloud_service_state = CloudServiceState.OPERATIONAL
+        CloudService.evaluation_received_results_counter = 0
+        CloudService.start_listener()
+
+        CloudService.current_working_date = data.get("end_date")
+
+        if "start_date" in data:
+            payload = {
+                "scope": MessageScope.TEST_DATA_ENOUGH_EXISTS.value,
+                "start_date": data.get("start_date"),
+                "current_date": data.get("end_date"),
+            }
+        else:
+            payload = {
+                "scope": MessageScope.TEST_DATA_ENOUGH_EXISTS.value,
+                "current_date": data.get("end_date"),
+            }
+
+        logger.info(f"Message received before checking existance: {data}")
+        CloudService.buffer = data
+        CloudService.buffer["scope"] = scope.value
+        CloudService._send_message_to_children(payload)
+
+    @staticmethod
+    def get_fog_test_result(message):
+        if message.get("enough_data_existence"):
+            CloudService.evaluation_received_results_counter += 1
+        else:
+            CloudService.send_status_update("error", "Found insufficient data on edge. Please skip this day.")
+            CloudService.cloud_service_state = CloudServiceState.IDLE
+            return
+
+        if CloudService.evaluation_received_results_counter == len(NodeState.get_current_node().child_nodes):
+            if not CloudService.buffer:
+                logger.error("Buffer data is not set. Cannot proceed with training process execution.")
+                CloudService.send_status_update("error", "Buffer data is missing; please retry operation.")
+                CloudService.cloud_service_state = CloudServiceState.IDLE
+                return
+
+            CloudService.send_status_update("success", "Found sufficient data on edge.")
+
+            CloudService.received_fog_performance_results_metrics = []
+            CloudService.received_fog_performance_results_predictions = []
+            CloudService.received_fog_performance_genetic_results = []
+
+            if CloudService.buffer.get("scope") == MessageScope.TRAINING.value:
+                if "start_date" in CloudService.buffer:
+                    CloudService.execute_training_process(
+                        CloudService.buffer.get("start_date"),
+                        CloudService.buffer.get("end_date"),
+                        CloudService.buffer.get("is_cache_active"),
+                        CloudService.buffer.get("genetic_evaluation_strategy"),
+                        CloudService.buffer.get("model_type")
+                    )
+                else:
+                    CloudService.execute_training_process(
+                        None,
+                        CloudService.buffer.get("end_date"),
+                        CloudService.buffer.get("is_cache_active"),
+                        CloudService.buffer.get("genetic_evaluation_strategy"),
+                        CloudService.buffer.get("model_type")
+                    )
+            elif CloudService.buffer.get("scope") == MessageScope.EVALUATION.value:
+                CloudService.perform_model_evaluation(CloudService.buffer.get("end_date"))
+
+            CloudService.send_status_update("success", "Processing complete.")
+
+    @staticmethod
+    def send_status_update(status: str, message: str, code: int = 0):
+        """
+        Sends a status update to the frontend.
+        status: one of "error", "warning", "success"
+        message: The status message string.
+        """
+        update_payload = {
+            "type": "status_update",
+            "status": status,
+            "message": message,
+            "timestamp": time.time(),
+            "code": code
+        }
+
+        if CloudService.websocket_connection and CloudService.websocket_loop:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    CloudService.websocket_connection.send_json(update_payload),
+                    CloudService.websocket_loop
+                )
+                logger.info(f"Sent status update: {update_payload}")
+            except Exception as e:
+                logger.error(f"Error sending status update: {e}")
+        else:
+            logger.warning("No websocket connection available to send status update.")
+
+    @staticmethod
+    def get_fog_genetic_results():
+        logger.info("Sending request for genetic results to fogs.")
+        payload = {
+            "scope": MessageScope.GENETIC_LOGBOOK.value
+        }
+        CloudService._send_message_to_children(payload)
+
+    @staticmethod
+    def get_fog_genetic_result(message):
+        CloudService.received_fog_performance_genetic_results.append(message)
+
+        if len(CloudService.received_fog_performance_genetic_results) == len(NodeState.get_current_node().child_nodes):
+            save_genetic_results_to_db(CloudService.current_working_date,
+                                       CloudService.received_fog_performance_genetic_results)
+
+    @staticmethod
+    def clear_cloud_results():
+        clear_all_data()
+        return {"message": "Successfully cleared cloud results from the database."}
+
+    @staticmethod
+    def save_nodes_record_to_db(data):
+        try:
+            # data is expected to be a list of node objects.
+            save_node_record_to_db(data)
+            return {"message": "Node records saved successfully."}
+        except Exception as e:
+            return {"error": str(e)}
+
+    @staticmethod
+    def update_node_records_and_relink_ids(data):
+        try:
+            update_node_records_and_relink_ids(data)
+            return {"message": "Update the node records an relink ids successfully."}
+        except Exception as e:
+            return {"error": str(e)}
+
