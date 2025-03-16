@@ -1,6 +1,6 @@
+import uuid
 from enum import Enum
 from typing import Optional, List
-import time
 
 
 class FedNodeType(Enum):
@@ -9,30 +9,18 @@ class FedNodeType(Enum):
     EDGE_NODE = 3
 
 
-class ModelScope(Enum):
+class MessageScope(Enum):
     TRAINING = 1
     EVALUATION = 2
+    TEST_DATA_ENOUGH_EXISTS = 3
+    GENETIC_LOGBOOK = 4
 
 
 def generate_unique_id(ip: str) -> str:
     """
-    Generate a 64-bit unique ID by combining:
-      - A 32-bit time component from time.time_ns() modulo 2^32, and
-      - A 32-bit integer representation of the IP address.
-
-    The ID structure (from high to low bits):
-      [ time_component (32 bits) | ip_component (32 bits) ]
+    Generate a unique identifier using a combination of the IP address and UUID.
     """
-
-    # Convert an IP address (x.x.x.x) to a 32-bit integer.
-    parts = ip.split('.')
-    # Convert the IP to a 32-bit integer
-    ip_int = (int(parts[0]) << 24) | (int(parts[1]) << 16) | (int(parts[2]) << 8) | int(parts[3])
-    # Use the lower 32 bits of time.time_ns() to get a time component
-    time_component = time.time_ns() % (1 << 32)
-    # Combine them: shift the time component to the high 32 bits and OR with the IP component
-    unique_id = (time_component << 32) | ip_int
-    return str(unique_id)
+    return f"{ip.replace('.', '')}-{uuid.uuid4().hex}"
 
 
 class FedNode:
