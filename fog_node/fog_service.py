@@ -46,6 +46,7 @@ class FogService:
 
     edge_evaluation_performances = {}
     edge_responses_counter = 0
+    messages_to_trainable_edges = {}
 
     @staticmethod
     def get_fog_service_state():
@@ -115,6 +116,7 @@ class FogService:
         FogService.init_rabbitmq()
         FogService.genetic_engine.setup(FogService.FOG_RABBITMQ_HOST, FogService.FOG_EDGE_SEND_EXCHANGE,
                                         FogService.EDGE_FOG_RECEIVE_QUEUE)
+        FogService.genetic_engine.set_cloud_node(NodeState.get_current_node().parent_node)
         cloud_listener = threading.Thread(target=FogService.listen_to_cloud_receiving_queue, daemon=True)
         cloud_listener.start()
 
@@ -193,6 +195,8 @@ class FogService:
                             FogService.orchestrate_enough_data_testing(message)
                         elif scope == MessageScope.GENETIC_LOGBOOK.value:
                             FogService.send_fog_model_to_cloud(MessageScope.GENETIC_LOGBOOK, None)
+                        elif scope == MessageScope.EVOLUTION_SYSTEM_METRICS.value:
+                            FogService.send_fog_model_to_cloud(MessageScope.EVOLUTION_SYSTEM_METRICS, None)
                         else:
                             logger.warning(f"There was met a an unknown scope of the model {scope}.")
                     except Exception as e1:
@@ -294,6 +298,8 @@ class FogService:
         logger.info(f"Forwarding the model and parameters to {len(trainable_edges)}.")
         logger.info(top_individuals)
 
+        FogService.messages_to_trainable_edges = {}
+
         for index, edge_node in enumerate(trainable_edges):
             individual = top_individuals[index]
             message = {
@@ -312,7 +318,7 @@ class FogService:
                 "patience": individual[3],
                 "fine_tune_layers": individual[4]
             }
-
+            FogService.messages_to_trainable_edges[edge_node.id] = message
             routing_key = str(edge_node.id)
             channel.basic_publish(exchange=FogService.FOG_EDGE_SEND_EXCHANGE, routing_key=routing_key,
                                   body=json.dumps(message))
@@ -475,6 +481,10 @@ class FogService:
             logger.info("Running sending the genetic logbook to cloud.")
             message = FogService.get_genetic_logbook()
 
+        elif model_scope.value == MessageScope.EVOLUTION_SYSTEM_METRICS.value:
+            logger.info("Running sending the evolution system metrics to cloud.")
+            message = FogService.get_evolution_system_metrics()
+
         published = False
         while not published:
             try:
@@ -599,4 +609,35 @@ class FogService:
             "scope": MessageScope.GENETIC_LOGBOOK.value
         }
 
+    @staticmethod
+    def handle_edge_node_unfinished_previous_round(edge_id: str):
+        trainable_edges = NodeState.get_current_node().child_nodes
+        tricky_node = next((node for node in trainable_edges if node.id == edge_id), None)
 
+        if tricky_node is not None:
+            time.sleep(360)
+            message = FogService.messages_to_trainable_edges[edge_id]
+
+            connection = pika.BlockingConnection(
+                pika.ConnectionParameters(
+                    host=FogService.FOG_RABBITMQ_HOST,
+                    heartbeat=30
+                )
+            )
+            channel = connection.channel()
+            routing_key = str(edge_id)
+            channel.basic_publish(exchange=FogService.FOG_EDGE_SEND_EXCHANGE, routing_key=routing_key,
+                                  body=json.dumps(message))
+            logger.info(f"Forwarded model to edge {tricky_node.name} ({tricky_node.ip_address}:"
+                        f"{tricky_node.port})")
+            connection.close()
+        else:
+            logger.error(f"No edge found with id {edge_id}.")
+
+    @staticmethod
+    def get_evolution_system_metrics():
+        return {
+            "fog_id": NodeState.get_current_node().id,
+            "system_metrics": FogService.genetic_engine.evolution_system_metrics,
+            "scope": MessageScope.EVOLUTION_SYSTEM_METRICS.value
+        }
