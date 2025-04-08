@@ -6,15 +6,17 @@ import os
 import asyncio
 import time
 import threading
+import requests
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
-from shared.fed_node.fed_node import MessageScope
+from shared.fed_node.fed_node import MessageScope, FedNode, ParentFedNode
 from edge_node.edge_resources_paths import EdgeResourcesPaths
 from edge_node.model_manager import pretrain_edge_model, retrain_edge_model, evaluate_edge_model, validate_data_size
 from shared.monitoring_thread import MonitoringThread
 from shared.utils import delete_all_files_in_folder, publish_message
 from shared.logging_config import logger
 from shared.utils import metric_weights
+from shared.system_metric_collector import SystemMetricCollector
 
 
 class EdgeService:
@@ -25,7 +27,13 @@ class EdgeService:
     rabbitmq_init_monitor_thread = None
     fog_listener_thread = None
     _publisher_loop = None
-    sequence_length = 60
+    sequence_length = 144
+    system_metrics_collector = SystemMetricCollector(sampling_rate=2.0)  # measure every two seconds
+
+    completed_previous_round_file_path = os.path.join(
+        EdgeResourcesPaths.FLAGS_FOLDER_PATH,
+        EdgeResourcesPaths.COMPLETED_PREVIOUS_ROUND_JSON_FILE
+    )
 
     @staticmethod
     def init_rabbitmq() -> None:
@@ -123,6 +131,7 @@ class EdgeService:
                         message["_correlation_id"] = properties.correlation_id
 
                         logger.info(f"Accepting message for child id {message.get('child_id')}.")
+                        EdgeService.set_completed_previous_round_flag(False)
                         EdgeService.execute_message_instructions(message)
                     except Exception as e1:
                         logger.error(f"Error processing message: {str(e1)}")
@@ -192,6 +201,7 @@ class EdgeService:
                             f"{response['edge_id']}, metrics: {response['metrics']}.")
             # Publish response to the fixed queue
             EdgeService.publish_response(response)
+            EdgeService.set_completed_previous_round_flag(True)
         except Exception as e:
             logger.error(f"Error processing the received message: {str(e)}")
 
@@ -216,10 +226,12 @@ class EdgeService:
         current_date = message.get("current_date")
 
         if scope == MessageScope.TEST_DATA_ENOUGH_EXISTS.value:
+            is_training_validation = message.get("is_training_validation")
             response = {
                 "edge_id": NodeState.get_current_node().id,
                 "scope": MessageScope.TEST_DATA_ENOUGH_EXISTS.value,
-                "enough_data_existence": validate_data_size(start_date, current_date, EdgeService.sequence_length)
+                "enough_data_existence": validate_data_size(start_date, current_date, EdgeService.sequence_length,
+                                                            is_training_validation)
             }
         else:
             try:
@@ -246,10 +258,14 @@ class EdgeService:
 
                 if start_date is not None:
                     # Pretraining process.
+                    EdgeService.system_metrics_collector.start()
                     metrics = pretrain_edge_model(
                         edge_model_file_path, start_date, current_date,
                         learning_rate, batch_size, epochs, patience, fine_tune_layers, EdgeService.sequence_length
                     )
+                    EdgeService.system_metrics_collector.stop()
+                    system_metrics = EdgeService.system_metrics_collector.get_average_metrics()
+
                     pretrained_model_file_path = os.path.join(
                         EdgeResourcesPaths.MODELS_FOLDER_PATH,
                         EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME
@@ -260,26 +276,38 @@ class EdgeService:
                     response = {
                         "edge_id": NodeState.get_current_node().id,
                         "metrics": metrics,
+                        "system_metrics": system_metrics,
                         "model_file": model_file_base64_resp,
                         "scope": MessageScope.TRAINING.value
                     }
                 else:
                     if scope == MessageScope.EVALUATION.value:
+                        EdgeService.system_metrics_collector.start()
+
+                        eval_seq_length = EdgeService.sequence_length // 2
+
                         metrics, prediction_pairs = evaluate_edge_model(edge_model_file_path, current_date,
                                                                         EdgeService.sequence_length)
+                        EdgeService.system_metrics_collector.stop()
+                        system_metrics = EdgeService.system_metrics_collector.get_average_metrics()
+
                         response = {
                             "edge_id": NodeState.get_current_node().id,
                             "metrics": metrics,
+                            "system_metrics": system_metrics,
                             "prediction_pairs": prediction_pairs,
                             "scope": MessageScope.EVALUATION.value,
                             "evaluation_date": current_date
                         }
                     else:
                         # Retraining process.
+                        EdgeService.system_metrics_collector.start()
                         metrics = retrain_edge_model(
                             edge_model_file_path, current_date,
                             learning_rate, batch_size, epochs, patience, fine_tune_layers, EdgeService.sequence_length
                         )
+                        EdgeService.system_metrics_collector.stop()
+                        system_metrics = EdgeService.system_metrics_collector.get_average_metrics()
 
                         def compute_weighted_score(metrics_for_score, weights_for_score):
                             return sum(
@@ -299,6 +327,7 @@ class EdgeService:
                             response = {
                                 "edge_id": NodeState.get_current_node().id,
                                 "metrics": metrics,
+                                "system_metrics": system_metrics,
                                 "model_file": model_file_base64_resp,
                                 "scope": MessageScope.TRAINING.value
                             }
@@ -309,6 +338,7 @@ class EdgeService:
                             response = {
                                 "edge_id": NodeState.get_current_node().id,
                                 "metrics": metrics,
+                                "system_metrics": system_metrics,
                                 "model_file": model_file_base64_resp,
                                 "scope": MessageScope.TRAINING.value
                             }
@@ -334,3 +364,69 @@ class EdgeService:
         return {
             "sequence_length": EdgeService.sequence_length
         }
+
+    @staticmethod
+    def get_completed_previous_round_flag():
+        logger.info("Getting completed previous round flag:")
+        if os.path.exists(EdgeService.completed_previous_round_file_path):
+            logger.info("Flag file exists.")
+            with open(EdgeService.completed_previous_round_file_path, 'r') as file:
+                data = json.load(file)
+                flag = bool(data.get('completed_previous_round_flag', False))
+                logger.info(f"The value of the flag {flag}.")
+                return flag
+        else:
+            return True
+
+    @staticmethod
+    def set_completed_previous_round_flag(flag: bool):
+        logger.info(f"Completed previous round flag is set now as : {flag}.")
+        data = {
+            'completed_previous_round_flag': flag,
+            'id': NodeState.get_current_node().id,
+            'name': NodeState.get_current_node().name,
+            'fed_node_type': NodeState.get_current_node().fed_node_type,
+            'ip_address': NodeState.get_current_node().ip_address,
+            'port': NodeState.get_current_node().port,
+            'parent_node_id': NodeState.get_current_node().parent_node.id,
+            'parent_node_name': NodeState.get_current_node().parent_node.name,
+            'parent_node_fed_node_type': NodeState.get_current_node().parent_node.fed_node_type,
+            'parent_node_ip_address': NodeState.get_current_node().parent_node.ip_address,
+            'parent_node_port': NodeState.get_current_node().parent_node.port
+            }
+
+        with open(EdgeService.completed_previous_round_file_path, 'w') as file:
+            json.dump(data, file)
+
+    @staticmethod
+    def execute_fog_notification_about_not_finished_training_round():
+        logger.info("Executing fog notification about finished training round.")
+        with open(EdgeService.completed_previous_round_file_path, 'r') as file:
+            data = json.load(file)
+        logger.info(f"The data extracted from completed previous round file: {data}.")
+        current_node = FedNode(data.get("id"), data.get("name"), data.get("fed_node_type"), data.get("ip_address"),
+                               data.get("port"))
+        NodeState.initialize_node(current_node)
+
+        logger.info(f"Initialized current node as {NodeState.get_current_node()}")
+
+        parent_node = ParentFedNode(data.get("parent_node_id"), data.get("parent_node_name"),
+                                    data.get("parent_node_fed_node_type"), data.get("parent_node_ip_address"),
+                                    data.get("parent_node_port"))
+        current_node.set_parent_node(parent_node)
+
+        logger.info(f"The parent of the current node is {parent_node}.")
+
+        time.sleep(300)
+
+        url = (f"http://{parent_node.ip_address}:{parent_node.port}/fog/"
+               f"notify-fog-from-edge-about-not-completed-previous-round")
+        try:
+            r = requests.post(url, json={"edge_id": current_node.id}, timeout=None)
+            logger.info(f"Received HTTP response from {url}: status code {r.status_code}")
+            if 200 <= r.status_code < 300:
+                logger.info(f"Response from {url} accepted.")
+            else:
+                logger.error(f"HTTP error from {url}: status code {r.status_code}")
+        except Exception as e1:
+            logger.error(f"HTTP request error to {url}: {e1}")
