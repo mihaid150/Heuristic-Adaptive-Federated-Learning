@@ -4,36 +4,37 @@ import random
 import math
 import os
 import base64
-import json
 import time
-from typing import Any
+from typing import Any, Optional
 
+import psutil
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from deap import base, tools
+import json
 from scipy.constants import Boltzmann
 from shared.fed_node.node_state import NodeState
 from shared.logging_config import logger
 from fog_node.fog_resources_paths import FogResourcesPaths
 from shared.shared_resources_paths import SharedResourcesPaths
 from shared.fed_node.fed_node import MessageScope
-from shared.utils import metric_weights
+from shared.utils import metric_weights, reinitialize_and_set_parent
+from shared.fed_node.fed_node import FedNode
 
 
-class FitnessMin(base.Fitness):
-    """
-    Represents a fitness object with minimization objective.
-    """
-    weights = (-1.0,)
+class FitnessMulti(base.Fitness):
+    # Both performance score and resource load are minimized.
+    weights = (-1.0, -1.0)
 
 
 class Individual(list):
     """
     Represents an individual in the genetic algorithm with predefined attributes.
     """
+
     def __init__(self, learning_rate, batch_size, epochs, patience, fine_tune_layers):
         super().__init__([learning_rate, batch_size, epochs, patience, fine_tune_layers])
-        self.fitness = FitnessMin()
+        self.fitness = FitnessMulti()
 
     @staticmethod
     def random_individual(learning_rate_bound, batch_size_bound, epochs_bound, patience_bound, fine_tune_layers_bound):
@@ -71,6 +72,47 @@ def select_evaluation_node():
     return selected
 
 
+def get_system_metrics():
+    # Get CPU usage over 1 second interval.
+    cpu_usage = psutil.cpu_percent(interval=1)
+
+    # Get memory usage percentage.
+    memory_usage = psutil.virtual_memory().percent
+
+    # Get average system load over the last 1, 5, and 15 minutes (only available on Unix systems).
+    load_avg = sum(psutil.getloadavg()) / 3
+
+    # Compute a combined resource load metric.
+    # You could change the weights based on what's most relevant in your context.
+    resource_load = (cpu_usage + memory_usage + load_avg) / 3
+
+    cpu_freq_obj = psutil.cpu_freq()
+    if cpu_freq_obj is not None and cpu_freq_obj.max:
+        normalized_cpu_freq = (cpu_freq_obj.current / cpu_freq_obj.max) * 100
+    else:
+        normalized_cpu_freq = 0
+
+    # Additional metric: Average sensor temperature
+    sensor_temps = psutil.sensors_temperatures(fahrenheit=False)
+    all_temps = []
+    for sensor_list in sensor_temps.values():
+        for reading in sensor_list:
+            all_temps.append(reading.current)
+    if all_temps:
+        average_sensor_temp = sum(all_temps) / len(all_temps)
+    else:
+        average_sensor_temp = 0
+
+    return {
+        "cpu_usage": cpu_usage,
+        "memory_usage": memory_usage,
+        "load_avg": load_avg,
+        "normalized_cpu_freq": normalized_cpu_freq,
+        "average_sensor_temp": average_sensor_temp,
+        "resource_load": resource_load
+    }
+
+
 # uses a single-objective minimization
 class GeneticEngine:
     def __init__(self):
@@ -78,9 +120,9 @@ class GeneticEngine:
         Initializes the Genetic Engine
         """
         # initialization with default values until update
-        self.population_size = 5
-        self.number_of_generations = 3
-        self.stagnation_limit = 2
+        self.population_size = 6
+        self.number_of_generations = 4
+        self.stagnation_limit = 3
 
         self.toolbox: Any = base.Toolbox()
         self.best_fitness = float("inf")
@@ -108,8 +150,8 @@ class GeneticEngine:
                                                          FogResourcesPaths.GENETIC_POPULATION_FILE_NAME)
 
         self.learning_rate_bound = (1, 100)
-        self.batch_size_bound = (64, 90)
-        self.epochs_bound = (10, 15)
+        self.batch_size_bound = (32, 64)
+        self.epochs_bound = (10, 20)
         self.patience_bound = (5, 10)
         self.fine_tune_layers_bound = (1, 3)
 
@@ -123,6 +165,11 @@ class GeneticEngine:
         self.logbook.header = self.DEFAULT_LOGBOOK_HEADER
         # hall of fame to maintain best individuals
         self.hall_of_fame = tools.HallOfFame(1)
+
+        self.cloud_node: Optional['FedNode'] = None
+
+        self.evolution_system_metrics = []
+        self.evolution_system_metrics_buffer = []
 
     def configure_training_parameters_bounds(self, lr_min, lr_max, bs_min, bs_max, ep_min, ep_max, pa_min, pa_max,
                                              ftl_min, ftl_max):
@@ -169,6 +216,9 @@ class GeneticEngine:
             "stagnation_limit": self.stagnation_limit,
         }
 
+    def set_cloud_node(self, cloud_node: FedNode):
+        self.cloud_node = cloud_node
+
     def adjust_population_size(self):
         """
         Adjust the current population to mathc the updated population_size.
@@ -198,9 +248,22 @@ class GeneticEngine:
         else:
             logger.info("Population size matches the new parameters, thus no adjustment needed.")
 
-    @staticmethod
-    def get_cloud_temperature():
-        return random.uniform(1, 100)
+    def get_cloud_temperature(self):
+        url = f"http://{self.cloud_node.ip_address}:{self.cloud_node.port}/cloud/get-cloud-temperature"
+        logger.info(f"Sending HTTP POST request to {url} for cloud temperature request.")
+        try:
+            r = requests.post(url, timeout=None)
+            logger.info(f"Received HTTP response from {url}: status code {r.status_code}")
+            if 200 <= r.status_code < 300:
+                logger.info(f"Response from {url} accepted.")
+                temp = r.json().get("cloud_temperature")
+                if temp is not None:
+                    return temp
+                else:
+                    return random.uniform(1, 100)
+        except Exception as e:
+            logger.info(f"HTTP request error to {url}: {e}")
+            return random.uniform(1, 100)
 
     def set_operating_data_date(self, dates):
         self.operating_data_date = dates
@@ -246,13 +309,13 @@ class GeneticEngine:
         self.toolbox.register("mutate", tools.mutUniformInt, low=[self.learning_rate_bound[0], self.batch_size_bound[0],
                                                                   self.epochs_bound[0], self.patience_bound[0],
                                                                   self.fine_tune_layers_bound[0]], up=[
-                                                                  self.learning_rate_bound[1], self.batch_size_bound[1],
-                                                                  self.epochs_bound[1], self.patience_bound[1],
-                                                                  self.fine_tune_layers_bound[1]], indpb=0.2)
+            self.learning_rate_bound[1], self.batch_size_bound[1],
+            self.epochs_bound[1], self.patience_bound[1],
+            self.fine_tune_layers_bound[1]], indpb=0.2)
         self.toolbox.register("select", tools.selTournament, tournsize=3)  # selection
 
         self.stats.register("avg", lambda fits: sum(fits) / len(fits))
-        self.stats.register("std", lambda fits: math.sqrt(sum((x - sum(fits)/len(fits)) ** 2 for x in fits) /
+        self.stats.register("std", lambda fits: math.sqrt(sum((x - sum(fits) / len(fits)) ** 2 for x in fits) /
                                                           len(fits)) if fits else 0)
         self.stats.register("min", min)
         self.stats.register("max", max)
@@ -317,7 +380,7 @@ class GeneticEngine:
             payload = payload_template.copy()
             payload["child_id"] = node.id
             url = f"http://{node.ip_address}:{node.port}/edge/execute-model-evaluation"
-            logger.info(f"Sending HTTP POST request to {url} with child_id: {node.id}.")
+            logger.info(f"Sending HTTP POST request to {url} with child: {node.name}.")
             try:
                 # No timeout is specified so that we wait as long as needed.
                 r = requests.post(url, json=payload, timeout=None)
@@ -331,27 +394,59 @@ class GeneticEngine:
                 logger.error(f"HTTP request error to {url}: {e1}")
             return None
 
+        max_trials = 3
+        # Create a dictionary to track the number of trials per node.
+        trial_counts = {node: 0 for node in evaluation_nodes}
         valid_responses = []
-        with ThreadPoolExecutor(max_workers=len(evaluation_nodes)) as executor:
-            futures = {executor.submit(send_request, node): node for node in evaluation_nodes}
-            logger.info("Submitted requests to evaluation nodes; waiting for responses...")
-            # Wait for all futures to complete (with no timeout)
-            for future in as_completed(futures):
-                node = futures[future]
-                try:
-                    res = future.result()
-                    if res is not None:
-                        logger.info("Received valid response from node %s", node.id)
-                        valid_responses.append(res)
-                    else:
-                        logger.error("No valid response from node %s", node.id)
-                except Exception as e:
-                    logger.error("Exception while processing response from node %s: %s", node.id, e)
+
+        # Continue looping until we have at least one valid response
+        # or all nodes have exhausted their maximum trials.
+        while not valid_responses and any(trial < max_trials for trial in trial_counts.values()):
+            # Only try nodes that have remaining trials.
+            nodes_to_try = [node for node in evaluation_nodes if trial_counts[node] < max_trials]
+
+            if not nodes_to_try:
+                break
+
+            with ThreadPoolExecutor(max_workers=len(nodes_to_try)) as executor:
+                futures = {executor.submit(send_request, node): node for node in nodes_to_try}
+                logger.info("Submitted requests to evaluation nodes; waiting for responses...")
+
+                for future in as_completed(futures):
+                    node = futures[future]
+                    try:
+                        res = future.result()
+                        if res is not None:
+                            logger.info("Received valid response from node %s", node.name)
+                            valid_responses.append(res)
+                        else:
+                            trial_counts[node] += 1
+                            logger.error("No valid response from node %s (trial %d)", node.id, trial_counts[node])
+                            if trial_counts[node] < max_trials:
+                                logger.info("Waiting 5 minutes before retrying node %s.", node.name)
+                                time.sleep(300)
+                                reinitialize_and_set_parent(node, NodeState.get_current_node())
+                                node.last_time_fitness_evaluation_performed_timestamp = time.time_ns()
+                                # Select a (potentially new) evaluation node for retrying.
+                                new_node = select_evaluation_node()
+                                logger.info("Retrying request using new evaluation node %s.", new_node.name)
+                                # Replace the old node with the new one and preserve the trial count.
+                                trial_counts[new_node] = trial_counts.pop(node)
+                                # Also update evaluation_nodes list so the new node is used in future iterations.
+                                evaluation_nodes[evaluation_nodes.index(node)] = new_node
+                    except Exception as e:
+                        trial_counts[node] += 1
+                        logger.error("Exception while processing response from node %s (trial %d): %s", node.name,
+                                     trial_counts[node], e)
+
+        if not valid_responses:
+            raise Exception("Maximum retries exceeded for all nodes with no valid response.")
 
         def compute_weighted_score(metrics, local_weights):
             return sum(local_weights[metric] * metrics[metric] for metric in local_weights)
 
         scores = []
+        resource_loads = []
         for resp in valid_responses:
             try:
                 score_before = compute_weighted_score(resp["metrics"]["before_training"], metric_weights)
@@ -363,9 +458,36 @@ class GeneticEngine:
             except Exception as e:
                 logger.error("Error computing score for a response: %s", e)
                 scores.append(1e6)  # Penalty score
-        final_score = sum(scores) / len(scores)
-        logger.info("Final fitness score computed: %s", final_score)
-        return final_score
+
+            try:
+                # Extract resource load from system metrics provided in the response.
+                system_metrics = resp.get("system_metrics")
+                self.evolution_system_metrics_buffer.append(system_metrics)
+                logger.info(f"Received system metrics: {system_metrics}")
+                if system_metrics and "resource_load" in system_metrics:
+                    resource_loads.append(system_metrics["resource_load"])
+                else:
+                    # Fallback to an external measurement if not provided.
+                    fallback_metrics = 1e6
+                    logger.info(f"Using fallback system metrics: {fallback_metrics}")
+                    resource_loads.append(fallback_metrics)
+            except Exception as e:
+                logger.error("Error retrieving system metrics from response: %s", e)
+                resource_loads.append(1e6)
+
+        if scores:
+            final_score = sum(scores) / len(scores)
+        else:
+            final_score = 1e6
+
+        if resource_loads:
+            avg_resource_load = sum(resource_loads) / len(resource_loads)
+        else:
+            avg_resource_load = 1e6
+
+        logger.info("Final multi-objective fitness computed: performance score = %s, resource load = %s", final_score,
+                    avg_resource_load)
+        return final_score, avg_resource_load
 
     def evolve(self):
         self.logbook = tools.Logbook()
@@ -382,9 +504,9 @@ class GeneticEngine:
 
         logger.info("Initial population size: %d", len(self.current_population))
         previous_best = self.best_fitness
-        best_individual = None
 
         for generation in range(self.number_of_generations):
+            self.evolution_system_metrics_buffer = []
             logger.info("Generation %d: Current population size: %d", generation, len(self.current_population))
             selected_node = select_evaluation_node()
             logger.info("Generation %d: Selected evaluation node %s.", generation, selected_node.name)
@@ -392,20 +514,19 @@ class GeneticEngine:
             # Evaluate each individual.
             for idx, ind in enumerate(self.current_population):
                 try:
-                    fit = self.toolbox.evaluate(ind)
+                    ind.fitness.values = self.toolbox.evaluate(ind)
                 except Exception as eval_e:
                     logger.error("Error evaluating individual %s: %s", ind, eval_e)
-                    fit = 1e6  # Penalty value on error
-                ind.fitness.values = (fit,)
-                if not ind.fitness.values or not math.isfinite(ind.fitness.values[0]):
+                    ind.fitness.values = (1e6, 1e6)
+                if not ind.fitness.values or not all(math.isfinite(val) for val in ind.fitness.values):
                     logger.error("Evaluation failed for individual %d: %s", idx, ind.fitness.values)
 
-            try:
-                best_individual = tools.selBest(self.current_population, 1)[0]
-                best_fitness = best_individual.fitness.values[0]
-            except Exception as sel_e:
-                logger.error("Generation %d: Error selecting best individual: %s", generation, sel_e)
-                break
+            # Use NSGA-II for multi-objective selection.
+            # The entire population is ranked according to Pareto dominance.
+            self.current_population = tools.selNSGA2(self.current_population, k=len(self.current_population))
+            # For logging or early stopping, choose a single "best" individual by an aggregate measure.
+            best_individual = min(self.current_population, key=lambda lind: sum(lind.fitness.values))
+            best_fitness = sum(best_individual.fitness.values)
 
             logger.info("Generation %d: Best fitness after evaluation: %s", generation, best_fitness)
             pop_fitness = [ind.fitness.values[0] for ind in self.current_population if ind.fitness.values]
@@ -416,13 +537,15 @@ class GeneticEngine:
                 self.crossover_probability = max(self.min_crossover_probability, self.crossover_probability - 0.05)
                 self.mutation_probability = max(self.min_mutation_probability, self.mutation_probability - 0.05)
                 logger.info(
-                    "Generation %d: Fitness improved. Decreasing crossover_probability to %s and mutation_probability to %s",
+                    "Generation %d: Fitness improved. Decreasing crossover_probability to %s and mutation_probability "
+                    "to %s",
                     generation, self.crossover_probability, self.mutation_probability)
             else:
                 self.crossover_probability = min(self.max_crossover_probability, self.crossover_probability + 0.05)
                 self.mutation_probability = min(self.max_mutation_probability, self.mutation_probability + 0.05)
                 logger.info(
-                    "Generation %d: No improvement. Increasing crossover_probability to %s and mutation_probability to %s",
+                    "Generation %d: No improvement. Increasing crossover_probability to %s and mutation_probability to "
+                    "%s",
                     generation, self.crossover_probability, self.mutation_probability)
 
             previous_best = best_fitness
@@ -465,14 +588,13 @@ class GeneticEngine:
                             modified = True
                             logger.info("Generation %d: Mutation performed for individual %d.", generation, idx)
                         if modified:
-                            # Instead of deleting the fitness, re-evaluate immediately.
                             try:
                                 new_fit = self.toolbox.evaluate(mutant)
                             except Exception as e:
                                 logger.error("Generation %d: Error re-evaluating mutated individual %d: %s", generation,
                                              idx, e)
-                                new_fit = 1e6
-                            mutant.fitness.values = (new_fit,)
+                                new_fit = (1e6, 1e6)
+                            mutant.fitness.values = new_fit
                             logger.info("Generation %d: Individual %d re-evaluated; new fitness: %s", generation, idx,
                                         new_fit)
                         else:
@@ -491,15 +613,15 @@ class GeneticEngine:
 
             # Double-check that all individuals have valid (finite) fitness values.
             for idx, ind in enumerate(self.current_population):
-                if not ind.fitness.values or not math.isfinite(ind.fitness.values[0]):
+                if not ind.fitness.values or not all(math.isfinite(val) for val in ind.fitness.values):
                     try:
                         fit = self.toolbox.evaluate(ind)
                     except Exception as e:
                         logger.error("Re-evaluation error for individual %d: %s", idx, e)
-                        fit = 1e6
-                    ind.fitness.values = (fit,)
+                        fit = (1e6, 1e6)
+                    ind.fitness.values = fit
                     logger.info("Individual %d re-evaluated during final check; new fitness: %s", idx,
-                                ind.fitness.values[0])
+                                ind.fitness.values)
 
             # Now compile and record statistics.
             record = self.stats.compile(self.current_population)
@@ -509,28 +631,48 @@ class GeneticEngine:
             logger.info("Generation %d: Logbook record: %s", generation, self.logbook.stream)
             self.hall_of_fame.update(self.current_population)
 
+            average_cpu_usage = (sum(sys_metrics["cpu_usage"] for sys_metrics in self.evolution_system_metrics_buffer) /
+                                 len(self.evolution_system_metrics_buffer))
+            average_memory_usage = (sum(sys_metrics["memory_usage"] for sys_metrics in
+                                        self.evolution_system_metrics_buffer) /
+                                    len(self.evolution_system_metrics_buffer))
+            average_load_avg = (sum(sys_metrics["load_avg"] for sys_metrics in self.evolution_system_metrics_buffer) /
+                                len(self.evolution_system_metrics_buffer))
+            average_resource_load = (sum(sys_metrics["resource_load"] for sys_metrics in
+                                         self.evolution_system_metrics_buffer) /
+                                     len(self.evolution_system_metrics_buffer))
+            average_normalized_cpu_freq = (sum(sys_metrics["normalized_cpu_freq"] for sys_metrics in
+                                               self.evolution_system_metrics_buffer) /
+                                           len(self.evolution_system_metrics_buffer))
+            average_average_sensor_temp = (sum(sys_metrics["average_sensor_temp"] for sys_metrics in
+                                               self.evolution_system_metrics_buffer) /
+                                           len(self.evolution_system_metrics_buffer))
+
+            generation_system_metrics_average = {
+                "gen": generation,
+                "cpu_usage": average_cpu_usage,
+                "memory_usage": average_memory_usage,
+                "load_avg": average_load_avg,
+                "normalized_cpu_freq": average_normalized_cpu_freq,
+                "average_sensor_temp": average_average_sensor_temp,
+                "resource_load": average_resource_load
+            }
+
+            self.evolution_system_metrics.append(generation_system_metrics_average)
+
         logger.info("Evolution complete! Best individual (hall of fame): %s with fitness %s",
                     self.hall_of_fame[0], self.hall_of_fame[0].fitness.values[0])
 
     def get_top_k_individuals(self, k):
-        """
-        Extracts the top k performing individuals from the current population.
-        :param k: Number of top-performing individuals to extract.
-        :return:  A list of top k individuals sorted by fitness (ascending order).
-        """
         logger.info(f"Requested individuals: {k}, Current Population Size {len(self.current_population)}.")
-        logger.info(self.current_population)
         if self.current_population is None:
             return ValueError("Population is empty. Ensure evolution has been run before calling this method.")
-
         if k > len(self.current_population):
-            raise ValueError(f"Requested top {k} individuals, but the population size is {len(self.current_population)}"
-                             f".")
-
+            raise ValueError(f"Requested top {k} individuals, but population size is {len(self.current_population)}.")
         for individual in self.current_population:
             if not individual.fitness.values:
-                individual.fitness.values = (1e6,)
-        sorted_population = sorted(self.current_population, key=lambda ind: ind.fitness.values[0])
+                individual.fitness.values = (1e6, 1e6)
+        sorted_population = sorted(self.current_population, key=lambda ind: sum(ind.fitness.values))
         return sorted_population[:k]
 
     def save_population_to_json(self):
@@ -538,9 +680,7 @@ class GeneticEngine:
             os.remove(self.genetic_population_file_path)
             logger.info(f"Existing population file '{self.genetic_population_file_path}' deleted.")
         population_data = []
-
         for individual in self.current_population:
-            # Convert the individual (a list) and include fitness values if they exist.
             fitness = list(individual.fitness.values) if hasattr(individual,
                                                                  "fitness") and individual.fitness.values else None
             individual_data = {
@@ -548,23 +688,13 @@ class GeneticEngine:
                 "fitness": fitness
             }
             population_data.append(individual_data)
-        # Convert each logbook record to a list of values using the header order.
         header = self.logbook.header if self.logbook.header else self.DEFAULT_LOGBOOK_HEADER
         logbook_records = []
         for record in self.logbook:
-            # For each key in the header, get the value from the record (or None if missing)
             rec_list = [record.get(key) for key in header]
             logbook_records.append(rec_list)
-        # Also save the logbook (header and records as lists)
-        logbook_data = {
-            "header": header,
-            "records": logbook_records
-        }
-
-        data_to_save = {
-            "population": population_data,
-            "logbook": logbook_data
-        }
+        logbook_data = {"header": header, "records": logbook_records}
+        data_to_save = {"population": population_data, "logbook": logbook_data}
         with open(self.genetic_population_file_path, "w") as f:
             json.dump(data_to_save, f, indent=2)
         logger.info(
@@ -576,17 +706,12 @@ class GeneticEngine:
             logger.info(f"Loading population and logbook from {self.genetic_population_file_path}")
             with open(self.genetic_population_file_path, "r") as f:
                 data = json.load(f)
-
             population_data = data.get("population", [])
             logbook_data = data.get("logbook", None)
-
             population = []
             for individual_data in population_data:
-                # Create a new individual via the toolbox
                 individual = self.toolbox.individual()
-                # Replace its content with the saved chromosome
                 individual[:] = individual_data.get("chromosome", [])
-                # Set its fitness values if present
                 fitness = individual_data.get("fitness")
                 if fitness is not None:
                     individual.fitness.values = tuple(fitness)
@@ -597,33 +722,27 @@ class GeneticEngine:
             if logbook_data is not None:
                 logger.info(f"Logbook data type: {type(logbook_data)}")
                 self.logbook = tools.Logbook()
-                # Handle logbook_data as dict (expected) or a list (legacy or error)
                 if isinstance(logbook_data, dict):
                     header = logbook_data.get("header", [])
                     records = logbook_data.get("records", [])
                 elif isinstance(logbook_data, list):
                     logger.warning(
-                        "Logbook data is a list, expected a dict with 'header' and 'records'. Using default header.")
+                        "Logbook data is a list; expected dict with 'header' and 'records'. Using default header.")
                     header = list(logbook_data[0].keys()) if logbook_data and isinstance(logbook_data[0], dict) else []
                     records = logbook_data
                 else:
                     logger.error(f"Unexpected logbook data type: {type(logbook_data)}. Initializing empty logbook.")
                     header = []
                     records = []
-
-                # Filter out records with invalid values (inf or nan)
                 filtered_records = []
                 for record in records:
-                    # Check each element in the record; if it is a float, ensure it is finite.
                     if all(not (isinstance(v, float) and (math.isnan(v) or not math.isfinite(v))) for v in record):
                         filtered_records.append(record)
                     else:
                         logger.warning("Removed logbook record with invalid value: %s", record)
-
                 self.logbook.header = header
                 logger.info(f"Logbook header loaded: {header}")
                 for record in filtered_records:
-                    # Depending on your record format, if it's a list, convert it to a dict.
                     if isinstance(record, dict):
                         self.logbook.record(**record)
                     elif isinstance(record, list):
@@ -632,7 +751,8 @@ class GeneticEngine:
                     else:
                         logger.error("Unexpected logbook record format: %s", record)
                 logger.info(
-                    f"Loaded logbook with {len(filtered_records)} valid records from {self.genetic_population_file_path}")
+                    f"Loaded logbook with {len(filtered_records)} valid records from "
+                    f"{self.genetic_population_file_path}")
             else:
                 logger.info("No logbook data found in saved file. Initializing empty logbook.")
                 self.logbook = tools.Logbook()
@@ -653,20 +773,18 @@ class GeneticEngine:
 
     def compute_phenotypic_diversity(self):
         fitness_values = [ind.fitness.values[0] for ind in self.current_population if ind.fitness.values]
-        if not fitness_values:  # If no valid fitness values are present
-            return 0  # or an appropriate default value
+        if not fitness_values:
+            return 0
         mean_fitness = sum(fitness_values) / len(fitness_values)
         variance = sum((x - mean_fitness) ** 2 for x in fitness_values) / len(fitness_values)
         return math.sqrt(variance)
 
     def safe_fitness(self, ind):
-        # If the individual does not have a valid fitness value, re-run the evaluation.
         if not ind.fitness.values or not math.isfinite(ind.fitness.values[0]):
             try:
                 new_fit = self.toolbox.evaluate(ind)
             except Exception as e:
                 logger.error("Error re-evaluating fitness for individual %s: %s", ind, e)
-                new_fit = 1e6  # use a penalty if re-evaluation fails
-            ind.fitness.values = (new_fit,)
-        return ind.fitness.values[0]
-
+                new_fit = (1e6, 1e6)
+            ind.fitness.values = new_fit
+        return sum(ind.fitness.values)
