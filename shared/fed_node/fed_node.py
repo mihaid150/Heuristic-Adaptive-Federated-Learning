@@ -1,6 +1,8 @@
 import uuid
 from enum import Enum
 from typing import Optional, List
+import subprocess
+import re
 
 
 class FedNodeType(Enum):
@@ -14,6 +16,7 @@ class MessageScope(Enum):
     EVALUATION = 2
     TEST_DATA_ENOUGH_EXISTS = 3
     GENETIC_LOGBOOK = 4
+    EVOLUTION_SYSTEM_METRICS = 5
 
 
 def generate_unique_id(ip: str) -> str:
@@ -21,6 +24,50 @@ def generate_unique_id(ip: str) -> str:
     Generate a unique identifier using a combination of the IP address and UUID.
     """
     return f"{ip.replace('.', '')}-{uuid.uuid4().hex}"
+
+
+def get_default_interface() -> Optional[str]:
+    """
+    Use 'ip route show default' to determine the default network interface.
+    """
+    try:
+        result = subprocess.check_output(["ip", "route", "show", "default"]).decode("utf-8")
+        # Look for 'dev <interface>' in the output.
+        match = re.search(r"dev (\S+)", result)
+        if match:
+            return match.group(1)
+    except Exception as e:
+        print("Error retrieving default interface:", e)
+    return None
+
+
+def get_mac_address() -> str:
+    """
+    Attempt to retrieve the MAC address for the default interface.
+    If that fails, try a list of common interface names.
+    """
+    interface = get_default_interface()
+    if interface:
+        try:
+            result = subprocess.check_output(["ip", "link", "show", interface]).decode("utf-8")
+            mac = re.search(r"link/ether ([0-9a-f:]{17})", result)
+            if mac:
+                return mac.group(1)
+        except subprocess.CalledProcessError as e:
+            print(f"Error retrieving MAC for default interface {interface}: {e}")
+
+    # Fallback: try common interface names.
+    for iface in ["eth0", "enp2s0", "ens33", "wlan0"]:
+        try:
+            result = subprocess.check_output(["ip", "link", "show", iface]).decode("utf-8")
+            mac = re.search(r"link/ether ([0-9a-f:]{17})", result)
+            if mac:
+                return mac.group(1)
+        except subprocess.CalledProcessError:
+            continue
+
+    # If all attempts fail, return a default placeholder.
+    return "00:00:00:00:00:00"
 
 
 class FedNode:
@@ -32,6 +79,7 @@ class FedNode:
         self.port = port
         self.parent_node: Optional['ParentFedNode'] = None
         self.child_nodes: List['ChildFedNode'] = []
+        self.device_mac = get_mac_address()
 
     def set_parent_node(self, parent_node: Optional['ParentFedNode']) -> None:
         """
