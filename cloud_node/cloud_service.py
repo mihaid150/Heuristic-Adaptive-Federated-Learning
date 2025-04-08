@@ -19,10 +19,10 @@ from cloud_node.cloud_cooling_scheduler import CloudCoolingScheduler
 from shared.utils import delete_all_files_in_folder
 from shared.monitoring_thread import MonitoringThread
 from shared.logging_config import logger
-from cloud_node.db_manager import (save_node_record_to_db, save_genetic_results_to_db, save_performance_results_to_db,
-                                   clear_all_data, save_prediction_results_to_db, load_prediction_results_from_db,
+from cloud_node.db_manager import (save_genetic_results_to_db, save_performance_results_to_db,
+                                   save_prediction_results_to_db, load_prediction_results_from_db,
                                    load_performance_results_from_db, load_genetic_results_from_db, init_db,
-                                   update_node_records_and_relink_ids)
+                                   get_edge_node_by_device_mac, save_system_metrics_to_db, load_system_metrics_from_db)
 
 
 class CloudServiceState(Enum):
@@ -46,6 +46,7 @@ class CloudService:
     received_fog_performance_results_metrics = []
     received_fog_performance_results_predictions = []
     received_fog_performance_genetic_results = []
+    received_fog_evolution_system_metrics = []
     evaluation_received_results_counter = 0
     rabbitmq_init_monitor_thread = None
     fog_models_listener_thread = None
@@ -275,7 +276,8 @@ class CloudService:
                 aggregate_fog_models(CloudService.received_fog_messages)
                 delete_all_files_in_folder(CloudResourcesPaths.MODELS_FOLDER_PATH, filter_string="fog")
                 CloudService.cloud_service_state = CloudServiceState.IDLE
-                CloudService.send_status_update("success", "Finished aggregating cloud model.")
+                CloudService.send_status_update("success", f"Finished aggregating cloud model for date "
+                                                           f"{CloudService.current_working_date}.")
                 CloudService.get_fog_genetic_results()
                 return
 
@@ -318,7 +320,8 @@ class CloudService:
             # Delete the received fog model files (keeping only the cloud model)
             delete_all_files_in_folder(CloudResourcesPaths.MODELS_FOLDER_PATH, filter_string="fog")
             CloudService.cloud_service_state = CloudServiceState.IDLE
-            CloudService.send_status_update("success", "Finished aggregating cloud model.")
+            CloudService.send_status_update("success", f"Finished aggregating cloud model for date "
+                                                       f"{CloudService.current_working_date}.")
             logger.info("Finished aggregating cloud model.")
             CloudService.get_fog_genetic_results()
 
@@ -352,6 +355,8 @@ class CloudService:
                         CloudService.get_fog_test_result(message)
                     elif int(message.get("scope")) == MessageScope.GENETIC_LOGBOOK.value:
                         CloudService.get_fog_genetic_result(message)
+                    elif int(message.get("scope")) == MessageScope.EVOLUTION_SYSTEM_METRICS.value:
+                        CloudService.get_received_fog_evolution_system_metrics(message)
                     else:
                         logger.warning(f"Received message from fog with scope {message.get('scope')} being not "
                                        f"recognized.")
@@ -461,9 +466,8 @@ class CloudService:
                                            CloudService.received_fog_performance_results_metrics)
             save_prediction_results_to_db(CloudService.current_working_date,
                                           CloudService.received_fog_performance_results_predictions)
-            # For genetic results, JSON was used only for sending to the frontend.
-            # You might want to call save_genetic_results_to_db similarly if needed.
-            CloudService.send_status_update("success", "Finished evaluating cloud model.", 1)
+            CloudService.send_status_update("success", f"Finished evaluating cloud model for date "
+                                                       f"{CloudService.current_working_date}.", 1)
 
     @staticmethod
     def get_model_performance_evaluation(data: dict) -> dict:
@@ -544,7 +548,7 @@ class CloudService:
             return result
 
         # --- Case 3: Numeric (Model Performance) Metrics ---
-        else:
+        elif metric_type == 1:
             performance_results = load_performance_results_from_db()
             from collections import defaultdict
             grouped_metrics = defaultdict(list)
@@ -567,6 +571,51 @@ class CloudService:
             result = {"performance_results": daily_averages}
             return result
 
+        # --- Case 4: System Metric -------
+        else:
+            system_metrics = load_system_metrics_from_db()
+            filter_fog_id = data.get("fog_id")
+            aggregated_system_metrics = {}
+
+            if isinstance(system_metrics, dict):
+                for eval_data, group in system_metrics.items():
+                    for record in group.get("system_metrics", []):
+                        if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                            continue
+                        current_date = record.get("evaluation_date")
+                        if not current_date:
+                            continue
+                        aggregated_system_metrics.setdefault(current_date, {})
+                        for rec in record.get("system_metrics", []):
+                            gen_number = rec.get("gen")
+                            if metric in rec and isinstance(rec[metric], (int, float)) and math.isfinite(rec[metric]):
+                                aggregated_system_metrics[current_date][gen_number] = rec[metric]
+            elif isinstance(system_metrics, list):
+                for record in system_metrics:
+                    if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                        continue
+                    eval_date = record.get("evaluation_date")
+                    if not eval_date:
+                        continue
+                    aggregated_system_metrics.setdefault(eval_date, {})
+                    for rec in record.get("system_metrics", []):
+                        gen_number = rec.get("gen")
+                        if metric in rec and isinstance(rec[metric], (int, float)) and math.isfinite(rec[metric]):
+                            aggregated_system_metrics[eval_date][gen_number] = rec[metric]
+            else:
+                return {"error": "System metrics have an unrecognized structure."}
+
+            aggregated_list = []
+
+            for date in sorted(aggregated_system_metrics.keys()):
+                generations = [
+                    {"gen": gen, "value": aggregated_system_metrics[date][gen]}
+                    for gen in sorted(aggregated_system_metrics[date].keys())
+                ]
+                aggregated_list.append({"evaluation_date": date, "generations": generations})
+            result = {"system_metrics": aggregated_list, "selected_metric": metric}
+            return result
+
     @staticmethod
     def get_available_performance_metrics() -> Dict[str, Any]:
         """
@@ -580,6 +629,8 @@ class CloudService:
         performance_results = load_performance_results_from_db()
         prediction_results = load_prediction_results_from_db()
         genetic_results = load_genetic_results_from_db()
+        system_metric_results = load_system_metrics_from_db()
+        logger.info(f"System metrics: {system_metric_results}")
 
         # Gather numeric performance metrics.
         model_performance_metrics = set()
@@ -611,10 +662,19 @@ class CloudService:
                         if key != "gen":  # We consider "gen" as an index; other keys are metric names.
                             genetic_metrics.add(key)
 
+        system_metric_metrics = set()
+        for date, group in system_metric_results.items():
+            for record in group.get("system_metrics", []):
+                for rec in record.get("system_metrics", []):
+                    for key in rec.keys():
+                        if key != "gen":
+                            system_metric_metrics.add(key)
+
         return {
             "model_performance_metrics": sorted(list(model_performance_metrics)),
             "prediction_metrics": sorted(list(prediction_metrics)),
-            "genetic_metrics": sorted(list(genetic_metrics))
+            "genetic_metrics": sorted(list(genetic_metrics)),
+            "system_metric_metrics": sorted(list(system_metric_metrics)),
         }
 
     @staticmethod
@@ -635,6 +695,7 @@ class CloudService:
             payload = {
                 "scope": MessageScope.TEST_DATA_ENOUGH_EXISTS.value,
                 "current_date": data.get("end_date"),
+                "is_training_validation": scope.value == MessageScope.TRAINING.value
             }
 
         logger.info(f"Message received before checking existance: {data}")
@@ -647,7 +708,8 @@ class CloudService:
         if message.get("enough_data_existence"):
             CloudService.evaluation_received_results_counter += 1
         else:
-            CloudService.send_status_update("error", "Found insufficient data on edge. Please skip this day.")
+            CloudService.send_status_update("error", f"Found insufficient data on edge. Please skip day "
+                                                     f"{CloudService.current_working_date}.")
             CloudService.cloud_service_state = CloudServiceState.IDLE
             return
 
@@ -658,11 +720,13 @@ class CloudService:
                 CloudService.cloud_service_state = CloudServiceState.IDLE
                 return
 
-            CloudService.send_status_update("success", "Found sufficient data on edge.")
+            CloudService.send_status_update("success", f"Found sufficient data on edge for date "
+                                                       f"{CloudService.current_working_date}.")
 
             CloudService.received_fog_performance_results_metrics = []
             CloudService.received_fog_performance_results_predictions = []
             CloudService.received_fog_performance_genetic_results = []
+            CloudService.received_fog_evolution_system_metrics = []
 
             if CloudService.buffer.get("scope") == MessageScope.TRAINING.value:
                 if "start_date" in CloudService.buffer:
@@ -684,7 +748,8 @@ class CloudService:
             elif CloudService.buffer.get("scope") == MessageScope.EVALUATION.value:
                 CloudService.perform_model_evaluation(CloudService.buffer.get("end_date"))
 
-            CloudService.send_status_update("success", "Processing complete.")
+            CloudService.send_status_update("success", f"Processing complete for date "
+                                                       f"{CloudService.current_working_date}.")
 
     @staticmethod
     def send_status_update(status: str, message: str, code: int = 0):
@@ -722,32 +787,36 @@ class CloudService:
         CloudService._send_message_to_children(payload)
 
     @staticmethod
+    def get_fog_evolution_system_metrics():
+        logger.info("Sending request for evolution system metrics to fogs.")
+        payload = {
+            "scope": MessageScope.EVOLUTION_SYSTEM_METRICS.value
+        }
+        CloudService._send_message_to_children(payload)
+
+    @staticmethod
     def get_fog_genetic_result(message):
         CloudService.received_fog_performance_genetic_results.append(message)
 
         if len(CloudService.received_fog_performance_genetic_results) == len(NodeState.get_current_node().child_nodes):
             save_genetic_results_to_db(CloudService.current_working_date,
                                        CloudService.received_fog_performance_genetic_results)
+            CloudService.get_fog_evolution_system_metrics()
 
     @staticmethod
-    def clear_cloud_results():
-        clear_all_data()
-        return {"message": "Successfully cleared cloud results from the database."}
+    def get_received_fog_evolution_system_metrics(message):
+        CloudService.received_fog_evolution_system_metrics.append(message)
+
+        if len(CloudService.received_fog_evolution_system_metrics) == len(NodeState.get_current_node().child_nodes):
+            save_system_metrics_to_db(CloudService.current_working_date,
+                                      CloudService.received_fog_evolution_system_metrics)
 
     @staticmethod
-    def save_nodes_record_to_db(data):
-        try:
-            # data is expected to be a list of node objects.
-            save_node_record_to_db(data)
-            return {"message": "Node records saved successfully."}
-        except Exception as e:
-            return {"error": str(e)}
+    def get_cloud_temperature():
+        if CloudService.cloud_cooling_scheduler.is_cloud_cooling_operational():
+            return {"cloud_temperature": CloudService.cloud_cooling_scheduler.temperature}
+        return {"cloud_temperature": 0.0}
 
     @staticmethod
-    def update_node_records_and_relink_ids(data):
-        try:
-            update_node_records_and_relink_ids(data)
-            return {"message": "Update the node records an relink ids successfully."}
-        except Exception as e:
-            return {"error": str(e)}
-
+    def get_edge_node_record_from_cloud_db(device_mac: str):
+        return get_edge_node_by_device_mac(device_mac)
