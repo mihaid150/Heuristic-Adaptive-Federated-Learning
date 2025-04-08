@@ -1,11 +1,14 @@
+# edge_node/model_manager.py
+
 import os
 import pandas as pd
 import tensorflow as tf
 import numpy as np
 
-from edge_node.data_selection import filter_data_by_interval_date, filter_data_by_day_date
+from edge_node.data_selection import filter_data_by_interval_date
 from edge_node.edge_resources_paths import EdgeResourcesPaths
 from edge_node.data_preprocessing import preprocess_data
+from shared.utils import required_columns
 from shared.logging_config import logger
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
@@ -49,20 +52,13 @@ def create_feature_sequences_with_padding(data, sequence_length):
     """
     Convert a 2D array (n_samples, features) into a 3D array of sequences,
     where each sequence has a fixed length equal to `sequence_length` timesteps.
-
     A sliding window of length `sequence_length` is used if possible.
     If the entire data is shorter than the desired window length, the data
-    is padded with zeros to reach `sequence_length`. Additionally, if only one
+    is padded with -1 (mask value) to reach `sequence_length`. Additionally, if only one
     sequence is generated, it is duplicated to ensure at least 2 sequences.
-
-    Parameters:
-        data (np.array): 2D array of shape (n_samples, num_features).
-        sequence_length (int): The desired fixed length for the sequences.
-
-    Returns:
-        np.array: 3D array of shape (num_sequences, sequence_length, num_features).
     """
     n_samples, num_features = data.shape
+    mask_value = -1  # using -1 as the mask value
 
     if n_samples >= sequence_length:
         num_windows = n_samples - sequence_length + 1
@@ -72,73 +68,87 @@ def create_feature_sequences_with_padding(data, sequence_length):
             f"Created {sequences.shape[0]} sequences of fixed length {sequence_length} with {num_features} features.")
     else:
         padding_needed = sequence_length - n_samples
-        pad = np.zeros((padding_needed, num_features))
+        pad = np.full((padding_needed, num_features), mask_value)  # pad with -1 instead of 0
         padded_data = np.vstack([data, pad])
         sequences = np.expand_dims(padded_data, axis=0)
         logger.warning(f"Data length ({n_samples}) is less than the desired window length ({sequence_length}). "
                        f"Returning a single padded sequence of fixed length {sequence_length}.")
 
-    # Ensure at least two sequences are available for metric computation.
     if sequences.shape[0] < 2:
         sequences = np.concatenate([sequences, sequences], axis=0)
-        logger.warning(
-            "Only one sequence was created; replicating it to ensure at least two sequences for metrics computation.")
+        logger.warning("Only one sequence was created; replicating it to ensure at least two sequences for metrics "
+                       "computation.")
 
     return sequences
 
 
-def create_target_sequences(targets: np.array, sequence_length: int, min_sequences: int = 2) -> np.array:
+def create_target_sequences(targets: np.array, sequence_length: int, min_sequences: int = 2, mask_value=-1) -> np.array:
     """
-    Convert a 1D target array into a sequence array that matches the number of sequences
-    produced for the features by a padding-based sequence function.
-
-    When len(targets) >= sequence_length, a sliding window is used to generate target values.
-    Otherwise, if there are not enough samples:
-        - If at least 2 samples exist, perform linear interpolation to generate min_sequences values.
-        - If only one sample exists, replicate it min_sequences times.
+    Convert a 1D target array into a sequence of target values corresponding to each sequence produced by the
+    feature padding function. When len(targets) >= sequence_length, a sliding window is used and the target
+    is taken as the last value in each window. Otherwise, if there are not enough samples,
+        - The target array is padded with mask_value (-1) to reach sequence_length,
+        - And the final (padded) target value is replicated min_sequences times.
 
     Parameters:
         targets (np.array): 1D array of target values.
-        sequence_length (int): Desired sequence length (used to decide sliding window vs. interpolation).
-        min_sequences (int): Minimum number of sequences to output when interpolation is used (default: 2).
+        sequence_length (int): Desired sequence length.
+        min_sequences (int): Minimum number of sequences to output when interpolation/padding is used.
+        mask_value (int/float): The value used for padding (here, -1).
 
     Returns:
-        np.array: 1D array of target values for each sequence.
+        np.array: 1D array of target values (one per sequence).
     """
     if len(targets) >= sequence_length:
-        # Use sliding window approach
         n_seq = len(targets) - sequence_length + 1
         return targets[sequence_length - 1: sequence_length - 1 + n_seq]
     else:
-        # Not enough samples: use interpolation if possible
-        if len(targets) >= 2:
-            # Create evenly spaced indices between 0 and len(targets)-1 for min_sequences points.
-            interp_indices = np.linspace(0, len(targets) - 1, num=min_sequences)
-            # Use np.interp to generate interpolated target values.
-            interpolated_targets = np.interp(interp_indices, np.arange(len(targets)), targets)
-            return interpolated_targets
-        elif len(targets) == 1:
-            # Only one target value: replicate it.
-            return np.array([targets[0]] * min_sequences)
-        else:
-            # No targets available; return an empty array.
-            return np.array([])
+        padding_needed = sequence_length - len(targets)
+        padded_targets = np.concatenate([targets, np.full((padding_needed,), mask_value)])
+        # Use the last value of the padded sequence as the target.
+        return np.array([padded_targets[-1]] * min_sequences)
+
+
+def post_preprocessing_padding(data_file_path: str, required_length: int, mask_value: float = -1):
+    df = pd.read_csv(data_file_path)
+    current_rows = len(df)
+    if required_length > current_rows > 0:
+        last_row = df.iloc[-1].copy()
+        last_row["synthetic"] = True  # mark as synthetic if needed
+        missing = 2 * required_length - current_rows
+        synthetic_rows = [last_row.copy() for _ in range(missing)]
+        df_synthetic = pd.DataFrame(synthetic_rows)
+        df = pd.concat([df, df_synthetic], ignore_index=True)
+        df.to_csv(data_file_path, index=False)
+    return data_file_path
+
+
+def determine_sequence_length(dataframe, target_length=144):
+    """
+    Determine the sequence length based on available data.
+    If available rows >= target_length, use target_length.
+    Otherwise, use the available number of rows.
+    """
+    available = dataframe.shape[0]
+    chosen_length = target_length if available >= target_length else available
+    logger.info(f"Determined sequence length: {chosen_length} (available rows: {available}, target: {target_length})")
+    return chosen_length
 
 
 def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: str, learning_rate: float,
                         batch_size: int, epochs: int, patience: int, fine_tune_layers: int, sequence_length):
     # Load and filter data
     filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", start_date, end_date,
-                                 EdgeResourcesPaths.FILTERED_DATA_PATH)
+                                 EdgeResourcesPaths.FILTERED_DATA_PATH, print_loggings=False)
     preprocess_data(EdgeResourcesPaths.FILTERED_DATA_PATH, "datetime", "apparent power (kWh)")
     data = pd.read_csv(EdgeResourcesPaths.FILTERED_DATA_PATH)
     logger.info(f"Filtered data shape: {data.shape}")
 
+    feature_columns = required_columns.copy()
+    feature_columns.remove("value")
+
     # Extract features and target
-    X = data[[
-        "value_rolling_mean_3", "value_rolling_max_3", "value_rolling_min_3",
-        "value_rolling_mean_6", "value_rolling_max_6"
-    ]].values
+    X = data[feature_columns].values
     y = data["value"].values
     logger.info(f"Features shape: {X.shape}, target length: {len(y)}")
 
@@ -168,7 +178,7 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
         layer.trainable = False
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=optimizer, loss=tf.keras.losses.LogCosh())
+    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber())
 
     logger.info("Training the model...")
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
@@ -198,37 +208,60 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
     return metrics
 
 
-def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: float,
-                       batch_size: int, epochs: int, patience: int, fine_tune_layers: int, sequence_length):
-    # Process current and next day data
-    current_day_data_path = EdgeResourcesPaths.CURRENT_DAY_DATA_PATH
-    next_day_data_path = EdgeResourcesPaths.NEXT_DAY_DATA_PATH
-    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", date, current_day_data_path)
-    preprocess_data(current_day_data_path, "datetime", "apparent power (kWh)")
-    next_day = pd.to_datetime(date) + pd.Timedelta(days=1)
-    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
-                            next_day.strftime("%Y-%m-%d"), next_day_data_path)
-    preprocess_data(next_day_data_path, "datetime", "apparent power (kWh)")
-    train_data = pd.read_csv(current_day_data_path)
-    eval_data = pd.read_csv(next_day_data_path)
-    logger.info(f"Training data shape: {train_data.shape}, Evaluation data shape: {eval_data.shape}")
+def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate: float,
+                       batch_size: int, epochs: int, patience: int, fine_tune_layers: int, target_sequence_length=144):
+    """
+    Retrain the edge model using two days for training and two days for evaluation.
+    'start_date' is the first training day.
+    Training period covers start_date and the next day.
+    Evaluation period covers the two days following the training period.
+    """
+    # Define dates for training and evaluation
+    training_day1 = start_date
+    training_day2 = (pd.to_datetime(start_date) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+    evaluation_day1 = (pd.to_datetime(start_date) + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+    evaluation_day2 = (pd.to_datetime(start_date) + pd.Timedelta(days=5)).strftime("%Y-%m-%d")
 
-    X_train = train_data[[
-        "value_rolling_mean_3", "value_rolling_max_3", "value_rolling_min_3",
-        "value_rolling_mean_6", "value_rolling_max_6"
-    ]].values
+    # Paths for merged training data and evaluation data
+    training_data_path = EdgeResourcesPaths.RETRAINING_DAYS_DATA_PATH  # new path for merged training data
+    evaluation_data_path = EdgeResourcesPaths.EVALUATION_DAYS_DATA_PATH  # new path for merged evaluation data
+
+    # For training, filter data from training_day1 to training_day2 (inclusive)
+    filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
+                                 training_day1, training_day2, training_data_path)
+    preprocess_data(training_data_path, "datetime", "apparent power (kWh)")
+    post_preprocessing_padding(training_data_path, target_sequence_length)
+    train_data = pd.read_csv(training_data_path)
+    logger.info(f"Training data shape (2 days): {train_data.shape}")
+
+    # For evaluation, filter data from evaluation_day1 to evaluation_day2 (inclusive)
+    filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
+                                 evaluation_day1, evaluation_day2, evaluation_data_path)
+    preprocess_data(evaluation_data_path, "datetime", "apparent power (kWh)")
+    post_preprocessing_padding(evaluation_data_path, target_sequence_length)
+    eval_data = pd.read_csv(evaluation_data_path)
+    logger.info(f"Evaluation data shape (2 days): {eval_data.shape}")
+
+    feature_columns = required_columns.copy()
+    feature_columns.remove("value")
+
+    # Extract features and target for training and evaluation
+    X_train = train_data[feature_columns].values
     y_train = train_data["value"].values
-    X_eval = eval_data[[
-        "value_rolling_mean_3", "value_rolling_max_3", "value_rolling_min_3",
-        "value_rolling_mean_6", "value_rolling_max_6"
-    ]].values
+    X_eval = eval_data[feature_columns].values
     y_eval = eval_data["value"].values
 
-    # Create sequences for training and evaluation data
-    X_train_seq = create_feature_sequences_with_padding(X_train, sequence_length=sequence_length)
-    y_train_seq = create_target_sequences(y_train, sequence_length=sequence_length)
-    X_eval_seq = create_feature_sequences_with_padding(X_eval, sequence_length=sequence_length)
-    y_eval_seq = create_target_sequences(y_eval, sequence_length=sequence_length)
+    # Dynamically determine sequence length for training and evaluation data
+    train_sequence_length = determine_sequence_length(train_data, target_length=target_sequence_length)
+    eval_sequence_length = determine_sequence_length(eval_data, target_length=target_sequence_length)
+    logger.info(f"Using training sequence length: {train_sequence_length} and evaluation sequence length: "
+                f"{eval_sequence_length}")
+
+    # Create sequences using the determined sequence lengths.
+    X_train_seq = create_feature_sequences_with_padding(X_train, sequence_length=train_sequence_length)
+    y_train_seq = create_target_sequences(y_train, sequence_length=train_sequence_length)
+    X_eval_seq = create_feature_sequences_with_padding(X_eval, sequence_length=eval_sequence_length)
+    y_eval_seq = create_target_sequences(y_eval, sequence_length=eval_sequence_length)
 
     logger.info(f"Training sequences: X_train_seq shape: {X_train_seq.shape}, y_train_seq shape: {y_train_seq.shape}")
     logger.info(f"Evaluation sequences: X_eval_seq shape: {X_eval_seq.shape}, y_eval_seq shape: {y_eval_seq.shape}")
@@ -248,7 +281,7 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
         layer.trainable = False
 
     optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=optimizer, loss=tf.keras.losses.LogCosh())
+    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber())
     logger.info("Retraining the model...")
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, restore_best_weights=True)
     model.fit(
@@ -276,22 +309,36 @@ def retrain_edge_model(edge_model_file_path: str, date: str, learning_rate: floa
     return metrics
 
 
-def evaluate_edge_model(edge_model_file_path: str, date: str, sequence_length):
-    current_day_data_path = EdgeResourcesPaths.CURRENT_DAY_DATA_PATH
+def evaluate_edge_model(edge_model_file_path: str, start_date: str, sequence_length):
+    """
+    Evaluate the edge model using seven days of data.
+    'start_date' is treated as the first evaluation day, and we collect data for seven consecutive days.
+    """
+    # Define evaluation period: from start_date to start_date + 6 days.
+    evaluation_day1 = start_date
+    evaluation_day7 = (pd.to_datetime(evaluation_day1) + pd.Timedelta(days=6)).strftime("%Y-%m-%d")
 
-    filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", date, current_day_data_path)
-    preprocess_data(current_day_data_path, "datetime", "apparent power (kWh)")
+    evaluation_data_path = EdgeResourcesPaths.EVALUATION_DAYS_DATA_PATH
+    # Filter data for the seven-day period.
+    filter_data_by_interval_date(
+        EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
+        evaluation_day1, evaluation_day7,
+        evaluation_data_path
+    )
+    preprocess_data(evaluation_data_path, "datetime", "apparent power (kWh)")
+    post_preprocessing_padding(evaluation_data_path, sequence_length)
+    eval_data = pd.read_csv(evaluation_data_path)
+    logger.info(f"Evaluation data shape (7 days): {eval_data.shape}")
 
-    eval_data = pd.read_csv(current_day_data_path)
-    logger.info(f"Evaluation data shape: {eval_data.shape}")
+    feature_columns = required_columns.copy()
+    feature_columns.remove("value")
 
-    X_eval = eval_data[["value_rolling_mean_3", "value_rolling_max_3", "value_rolling_min_3",
-                        "value_rolling_mean_6", "value_rolling_max_6"]].values
+    X_eval = eval_data[feature_columns].values
     y_eval = eval_data["value"].values
 
+    # Use the same window length (144) as during training.
     X_eval_seq = create_feature_sequences_with_padding(X_eval, sequence_length=sequence_length)
     y_eval_seq = create_target_sequences(y_eval, sequence_length=sequence_length)
-
     logger.info(f"Evaluation sequences: X_eval_seq shape: {X_eval_seq.shape}, y_eval_seq shape: {y_eval_seq.shape}")
 
     custom_objects = {
@@ -301,7 +348,7 @@ def evaluate_edge_model(edge_model_file_path: str, date: str, sequence_length):
     }
     model = tf.keras.models.load_model(edge_model_file_path, custom_objects=custom_objects)
 
-    logger.info("Evaluating the model on next day's data...")
+    logger.info("Evaluating the model on seven days of data...")
     predictions = model.predict(X_eval_seq)
     metrics = compute_metrics(y_eval_seq, predictions)
     logger.info(f"Evaluation metrics: {metrics}")
@@ -311,41 +358,82 @@ def evaluate_edge_model(edge_model_file_path: str, date: str, sequence_length):
     return metrics, prediction_pairs
 
 
-def validate_data_size(start_date: str, end_date: str, sequence_length: int) -> bool:
+def validate_data_size(start_date: str, end_date: str, sequence_length: int, is_training_validation: bool = True) -> (
+        bool):
     if start_date is not None:
         logger.info(f"Validating data size for interval filtering: start_date={start_date}, end_date={end_date}")
         filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", start_date, end_date,
-                                     EdgeResourcesPaths.FILTERED_DATA_PATH)
+                                     EdgeResourcesPaths.FILTERED_DATA_PATH, print_loggings=False)
         preprocess_data(EdgeResourcesPaths.FILTERED_DATA_PATH, "datetime", "apparent power (kWh)")
         data = pd.read_csv(EdgeResourcesPaths.FILTERED_DATA_PATH)
         logger.info(f"Filtered data shape: {data.shape}")
 
         if sequence_length >= data.shape[0]:
-            logger.error(f"Sequence length ({sequence_length}) is greater than or equal to the number of rows ({data.shape[0]}).")
+            logger.error(f"Sequence length ({sequence_length}) is greater than or equal to the number of rows "
+                         f"({data.shape[0]}).")
             return False
         else:
             logger.info(f"Data size is sufficient for sequence length {sequence_length}.")
             return True
     else:
-        logger.info(f"Validating data size for day-based filtering for date: {end_date}")
-        current_day_data_path = EdgeResourcesPaths.CURRENT_DAY_DATA_PATH
-        next_day_data_path = EdgeResourcesPaths.NEXT_DAY_DATA_PATH
+        if is_training_validation:
+            training_days_data_path = EdgeResourcesPaths.RETRAINING_DAYS_DATA_PATH
+            evaluation_day_data_path = EdgeResourcesPaths.EVALUATION_DAYS_DATA_PATH
 
-        filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", end_date, current_day_data_path)
-        preprocess_data(current_day_data_path, "datetime", "apparent power (kWh)")
-        next_day = pd.to_datetime(end_date) + pd.Timedelta(days=1)
-        filter_data_by_day_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
-                                next_day.strftime("%Y-%m-%d"), next_day_data_path)
-        preprocess_data(next_day_data_path, "datetime", "apparent power (kWh)")
-        train_data = pd.read_csv(current_day_data_path)
-        eval_data = pd.read_csv(next_day_data_path)
-        logger.info(f"Training data shape: {train_data.shape}, Evaluation data shape: {eval_data.shape}")
+            training_day1 = end_date
+            training_day2 = (pd.to_datetime(end_date) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
+            evaluation_day1 = (pd.to_datetime(end_date) + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
+            evaluation_day2 = (pd.to_datetime(end_date) + pd.Timedelta(days=5)).strftime("%Y-%m-%d")
+            logger.info(f"Training validation data size of 2-day-based filtering for dates training day 1 "
+                        f"{training_day1} and training day 2 {training_day2} with evaluation day 1 {evaluation_day1} "
+                        f"and evaluation day 2 {evaluation_day2}")
 
-        if sequence_length >= train_data.shape[0] or sequence_length >= eval_data.shape[0]:
-            logger.error(f"Sequence length ({sequence_length}) is greater than or equal to the training or evaluation data size.")
-            return False
+            filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", training_day1,
+                                         training_day2, training_days_data_path)
+            preprocess_data(training_days_data_path, "datetime", "apparent power (kWh)")
+
+            filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
+                                         evaluation_day1, evaluation_day2,
+                                         evaluation_day_data_path)
+
+            preprocess_data(evaluation_day_data_path, "datetime", "apparent power (kWh)")
+
+            train_data = pd.read_csv(training_days_data_path)
+            eval_data = pd.read_csv(evaluation_day_data_path)
+            logger.info(f"Training data shape: {train_data.shape}, Evaluation data shape: {eval_data.shape}")
+
+            if sequence_length > train_data.shape[0] or sequence_length / 2 >= eval_data.shape[0]:
+                logger.error(f"Sequence length ({sequence_length}) is greater than or equal to the training or "
+                             f"evaluation data size.")
+                return False
+            else:
+                logger.info(f"Data sizes are sufficient for sequence length {sequence_length} (both training and "
+                            f"evaluation).")
+                return True
         else:
-            logger.info(f"Data sizes are sufficient for sequence length {sequence_length} (both training and evaluation).")
-            return True
+            logger.info(f"Evaluation validation data size for day-based filtering for date: {end_date}")
 
+            evaluation_day1 = end_date
+            evaluation_day7 = (pd.to_datetime(evaluation_day1) + pd.Timedelta(days=6)).strftime("%Y-%m-%d")
 
+            evaluation_data_path = EdgeResourcesPaths.EVALUATION_DAYS_DATA_PATH
+            # Filter data for the seven-day period.
+            filter_data_by_interval_date(
+                EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
+                evaluation_day1, evaluation_day7,
+                evaluation_data_path
+            )
+
+            preprocess_data(evaluation_data_path, "datetime", "apparent power (kWh)")
+
+            train_data = pd.read_csv(evaluation_data_path)
+            logger.info(f"Training data shape: {train_data.shape}")
+
+            if train_data.shape[0] < sequence_length:
+                logger.error(f"Sequence length ({sequence_length}) is greater than or equal to the training or "
+                             f"evaluation data size.")
+                return False
+            else:
+                logger.info(f"Data sizes are sufficient for sequence length {sequence_length} (both training and "
+                            f"evaluation).")
+                return True
