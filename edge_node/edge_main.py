@@ -5,7 +5,6 @@ from typing import Any, Dict
 from fastapi import APIRouter
 from starlette.websockets import WebSocket, WebSocketDisconnect
 from shared.logging_config import logger
-
 from edge_node.edge_service import EdgeService
 
 edge_router = APIRouter()
@@ -53,3 +52,8 @@ def configure_edge_data_parameters(data):
 
 def get_edge_data_parameters():
     return EdgeService.get_edge_training_parameters()
+
+
+@edge_router.post("/async-execute-notify-fog-from-edge-about-not-completed-previous-round")
+def async_execute_notify_fog_from_edge_about_not_completed_previous_round():
+    EdgeService.execute_fog_notification_about_not_finished_training_round()
