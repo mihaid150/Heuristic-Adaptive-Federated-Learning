@@ -13,6 +13,7 @@ services:
     network_mode: "host"
     volumes:
       - ../cache:/app/cache
+      - ../flags:/app/flags
     mem_limit: 3g
 
 networks:
