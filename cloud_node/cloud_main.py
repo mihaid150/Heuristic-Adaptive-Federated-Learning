@@ -3,6 +3,8 @@ import asyncio
 from typing import Dict, Any
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from cloud_node.cloud_service import CloudService
+from cloud_node.cloud_results import (execute_clear_cloud_results, execute_update_node_records_and_relink_ids,
+                                      execute_save_node_record_to_db)
 from shared.logging_config import logger
 from shared.fed_node.fed_node import MessageScope
 
@@ -45,11 +47,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 elif operation == "get_model_performance_evaluation":
                     response = get_model_performance_evaluation(data)
                 elif operation == "clear_cloud_results":
-                    response = clear_cloud_results()
+                    response = execute_clear_cloud_results()
                 elif operation == "record_nodes_to_cloud_db":
-                    response = record_nodes_to_cloud_db(data)
+                    response = execute_save_node_record_to_db(data)
                 elif operation == "update_node_records_and_relink_ids":
-                    response = update_node_records_and_relink_ids(data)
+                    response = execute_update_node_records_and_relink_ids(data)
                 else:
                     response = {"error": "Invalid operation"}
             except Exception as e:
@@ -58,8 +60,16 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_json(response)
     except WebSocketDisconnect:
         logger.warning("WebSocket disconnected.")
-    # finally:
-    #     CloudService.websocket_connection = None
+
+
+@cloud_router.post("/get-cloud-temperature")
+async def execute_get_cloud_temperature():
+    return CloudService.get_cloud_temperature()
+
+
+@cloud_router.post("/get_edge_node_record_from_cloud_db")
+async def execute_get_edge_node_record_from_cloud_db(message: dict):
+    return CloudService.get_edge_node_record_from_cloud_db(message.get("device_mac"))
 
 
 def get_cloud_status():
@@ -131,15 +141,3 @@ def get_available_performance_metrics():
 
 def get_model_performance_evaluation(data):
     return CloudService.get_model_performance_evaluation(data)
-
-
-def clear_cloud_results():
-    return CloudService.clear_cloud_results()
-
-
-def record_nodes_to_cloud_db(data):
-    return CloudService.save_nodes_record_to_db(data)
-
-
-def update_node_records_and_relink_ids(data):
-    return CloudService.update_node_records_and_relink_ids(data)
