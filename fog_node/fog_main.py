@@ -37,6 +37,11 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.warning("Websocket disconnected.")
 
 
+@fog_router.post("/notify-fog-from-edge-about-not-completed-previous-round")
+async def execute_model_evaluation_endpoint(message: dict):
+    FogService.handle_edge_node_unfinished_previous_round(message.get("edge_id"))
+
+
 def get_fog_service_state():
     return FogService.get_fog_service_state()
 
