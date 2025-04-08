@@ -16,6 +16,7 @@ SessionLocal = sessionmaker(bind=engine)
 # Define the base class.
 Base = declarative_base()
 
+
 # ------------------ ORM Models ------------------
 
 
@@ -28,6 +29,7 @@ class Evaluation(Base):
     # Relationships to genetic and prediction records.
     genetic_records = relationship("GeneticRecord", back_populates="evaluation", cascade="all, delete")
     prediction_records = relationship("PredictionRecord", back_populates="evaluation", cascade="all, delete")
+    system_metrics = relationship("SystemMetricRecord", back_populates="evaluation", cascade="all, delete")
 
 
 class PerformanceRecord(Base):
@@ -85,6 +87,22 @@ class PredictionRecord(Base):
     )
 
 
+class SystemMetricRecord(Base):
+    __tablename__ = "system_metric_record"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    evaluation_id = Column(Integer, ForeignKey("evaluation.id"), nullable=False)
+    fog_id = Column(String, nullable=True)
+    generation = Column(Integer, nullable=False)
+    cpu_usage = Column(Float)
+    memory_usage = Column(Float)
+    load_avg = Column(Float)
+    normalized_cpu_freq = Column(Float)
+    average_sensor_temp = Column(Float)
+    resource_load = Column(Float)
+
+    evaluation = relationship("Evaluation", back_populates="system_metrics")
+
+
 class NodeRecord(Base):
     __tablename__ = "node_record"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -93,6 +111,8 @@ class NodeRecord(Base):
     node_label = Column(String, nullable=False)
     parent_id = Column(String, nullable=True)
     parent_label = Column(String, nullable=True)
+    device_mac = Column(String, nullable=True)
+
 
 # ------------------ Database Setup ------------------
 
@@ -114,6 +134,7 @@ def clear_all_data() -> None:
         session.query(PredictionRecord).delete()
         session.query(GeneticRecord).delete()
         session.query(PerformanceRecord).delete()
+        session.query(SystemMetricRecord).delete()
         # Then delete rows from the parent table
         session.query(Evaluation).delete()
         session.query(NodeRecord).delete()
@@ -141,6 +162,7 @@ def save_node_record_to_db(nodes: List[Dict[str, Any]]) -> None:
                 node_label=node.get("label"),
                 parent_id=node.get("parent_id"),
                 parent_label=node.get("parent_label"),
+                device_mac=node.get("device_mac"),
             )
             session.add(node_record)
         session.commit()
@@ -176,9 +198,10 @@ def update_node_records_and_relink_ids(nodes: List[Dict[str, Any]]) -> None:
             label = new_node.get("label")
             parent_id = new_node.get("parent_id")  # parent's local id as received
             parent_label = new_node.get("parent_label")
+            mac_address = new_node.get("device_mac")
 
-            # Try to find an existing node record with the same label.
-            existing_record = session.query(NodeRecord).filter_by(node_label=label).first()
+            # Try to find an existing node record with the same mac.
+            existing_record = session.query(NodeRecord).filter_by(node_label=mac_address).first()
 
             if existing_record:
                 old_id = existing_record.node_id
@@ -187,6 +210,7 @@ def update_node_records_and_relink_ids(nodes: List[Dict[str, Any]]) -> None:
                 existing_record.node_id = new_id
                 existing_record.parent_id = parent_id
                 existing_record.parent_label = parent_label
+                existing_record.device_mac = mac_address
                 # Map old id to new id.
                 id_mapping[old_id] = new_id
             else:
@@ -197,22 +221,12 @@ def update_node_records_and_relink_ids(nodes: List[Dict[str, Any]]) -> None:
                     node_label=label,
                     parent_id=parent_id,
                     parent_label=parent_label,
+                    device_mac=mac_address,
                 )
                 session.add(new_record)
         session.commit()
         logger.info("Node records updated successfully.")
         logger.info(f"ID Mapping: {id_mapping}")
-
-        # Query and log unique ids from related tables BEFORE updating them.
-        perf_fog_ids_before = [row[0] for row in session.query(PerformanceRecord.fog_id).distinct().all()]
-        perf_edge_ids_before = [row[0] for row in session.query(PerformanceRecord.edge_id).distinct().all()]
-        genetic_ids_before = [row[0] for row in session.query(GeneticRecord.fog_id).distinct().all()]
-        pred_fog_ids_before = [row[0] for row in session.query(PredictionRecord.fog_id).distinct().all()]
-        pred_edge_ids_before = [row[0] for row in session.query(PredictionRecord.edge_id).distinct().all()]
-
-        # logger.info("Before update - PerformanceRecord: fog_ids=%s, edge_ids=%s", perf_fog_ids_before, perf_edge_ids_before)
-        # logger.info("Before update - GeneticRecord: fog_ids=%s", genetic_ids_before)
-        # logger.info("Before update - PredictionRecord: fog_ids=%s, edge_ids=%s", pred_fog_ids_before, pred_edge_ids_before)
 
         # Now, update all other tables that reference these node ids.
         for old_id, new_id in id_mapping.items():
@@ -226,19 +240,10 @@ def update_node_records_and_relink_ids(nodes: List[Dict[str, Any]]) -> None:
                 {PredictionRecord.fog_id: new_id}, synchronize_session=False)
             session.query(PredictionRecord).filter(PredictionRecord.edge_id == old_id).update(
                 {PredictionRecord.edge_id: new_id}, synchronize_session=False)
+            session.query(SystemMetricRecord).filter(SystemMetricRecord.fog_id == old_id).update(
+                {SystemMetricRecord.fog_id: new_id}, synchronize_session=False)
         session.commit()
         logger.info("Re-linked node ids in related tables successfully.")
-
-        # Query and log unique ids from related tables AFTER updating them.
-        perf_fog_ids_after = [row[0] for row in session.query(PerformanceRecord.fog_id).distinct().all()]
-        perf_edge_ids_after = [row[0] for row in session.query(PerformanceRecord.edge_id).distinct().all()]
-        genetic_ids_after = [row[0] for row in session.query(GeneticRecord.fog_id).distinct().all()]
-        pred_fog_ids_after = [row[0] for row in session.query(PredictionRecord.fog_id).distinct().all()]
-        pred_edge_ids_after = [row[0] for row in session.query(PredictionRecord.edge_id).distinct().all()]
-
-        # logger.info("After update - PerformanceRecord: fog_ids=%s, edge_ids=%s", perf_fog_ids_after, perf_edge_ids_after)
-        # logger.info("After update - GeneticRecord: fog_ids=%s", genetic_ids_after)
-        # logger.info("After update - PredictionRecord: fog_ids=%s, edge_ids=%s", pred_fog_ids_after, pred_edge_ids_after)
 
     except Exception as e:
         session.rollback()
@@ -409,6 +414,7 @@ def save_prediction_results_to_db(current_working_date: str,
     finally:
         session.close()
 
+
 # ------------------ Load Functions ------------------
 
 
@@ -505,7 +511,6 @@ def load_genetic_results_from_db() -> dict:
             date = eval_obj.evaluation_date
             records_by_fog = {}
             for record in eval_obj.genetic_records:
-                logger.info(f"Genetic record: {record.fog_id}")
                 fog_id = record.fog_id if record.fog_id is not None else "all"
                 record_entry = {
                     "gen": record.generation,
@@ -584,6 +589,113 @@ def load_prediction_results_from_db() -> dict[InstrumentedAttribute, dict[str, l
             results_by_date[date] = {"prediction_results": prediction_results}
     except Exception as e:
         logger.error("Error loading prediction results: %s", e)
+    finally:
+        session.close()
+    return results_by_date
+
+
+def get_edge_node_by_device_mac(device_mac: str):
+    """
+    Query the database for a node record matching the provided device_mac
+    and return a dict structure.
+    """
+    session: Session = SessionLocal()
+    try:
+        node_record = session.query(NodeRecord).filter(device_mac=device_mac).first()
+        if node_record is None:
+            raise ValueError(f"No FedNode found with device_mac: {device_mac}")
+        return {
+            "id": node_record.node_id,
+            "label": node_record.node_label,
+            "parent_id": node_record.parent_id,
+            "parent_label": node_record.parent_label
+        }
+    except Exception as e:
+        logger.error("Error retrieving node record for device_mac %s: %s", device_mac, e)
+        raise e
+    finally:
+        session.close()
+
+
+def save_system_metrics_to_db(current_working_data: str, received_fog_system_metrics):
+    if not current_working_data:
+        logger.error("No current working date provided; cannot save system metrics.")
+        return
+
+    session: Session = SessionLocal()
+
+    try:
+        evaluation = session.query(Evaluation).filter_by(evaluation_date=current_working_data).first()
+        if not evaluation:
+            evaluation = Evaluation(evaluation_date=current_working_data)
+            session.add(evaluation)
+            session.flush()
+
+        for record in received_fog_system_metrics:
+            fog_id = record.get("fog_id")
+            system_metrics = record.get("system_metrics")
+
+            for gen_rec in system_metrics:
+                gen_number = gen_rec.get("gen")
+                cpu_usage = gen_rec.get("cpu_usage")
+                memory_usage = gen_rec.get("memory_usage")
+                load_avg = gen_rec.get("load_avg")
+                normalized_cpu_freq = gen_rec.get("normalized_cpu_freq")
+                average_sensor_temp = gen_rec.get("average_sensor_temp")
+                resource_load = gen_rec.get("resource_load")
+
+                if gen_number is not None:
+                    system_metric_record = SystemMetricRecord(
+                        evaluation_id=evaluation.id,
+                        fog_id=fog_id,
+                        generation=gen_number,
+                        cpu_usage=cpu_usage,
+                        memory_usage=memory_usage,
+                        load_avg=load_avg,
+                        normalized_cpu_freq=normalized_cpu_freq,
+                        average_sensor_temp=average_sensor_temp,
+                        resource_load=resource_load
+                    )
+                    session.add(system_metric_record)
+        session.commit()
+        logger.info("Successfully saved system metrics.")
+    except Exception as e:
+        session.rollback()
+        logger.error("Error while saving system metrics: %s", e)
+    finally:
+        session.close()
+
+
+def load_system_metrics_from_db() -> dict:
+    session: Session = SessionLocal()
+    results_by_date = {}
+    try:
+        evaluations = session.query(Evaluation).order_by(Evaluation.evaluation_date).all()
+        for eval_obj in evaluations:
+            date = eval_obj.evaluation_date
+            records_by_fog = {}
+            for record in eval_obj.system_metrics:
+                fog_id = record.fog_id if record.fog_id is not None else "all"
+                record_entry = {
+                    "gen": record.generation,
+                    "cpu_usage": record.cpu_usage,
+                    "memory_usage": record.memory_usage,
+                    "load_avg": record.load_avg,
+                    "normalized_cpu_freq": record.normalized_cpu_freq,
+                    "average_sensor_temp": record.average_sensor_temp,
+                    "resource_load": record.resource_load
+                }
+                if fog_id not in records_by_fog:
+                    records_by_fog[fog_id] = {"fog_id": fog_id, "system_metrics": []}
+                records_by_fog[fog_id]["system_metrics"].append(record_entry)
+
+                system_metric_results = []
+                for rec in records_by_fog.values():
+                    rec["evaluation_date"] = date
+                    system_metric_results.append(rec)
+                results_by_date[date] = {"system_metrics": system_metric_results}
+    except Exception as e:
+        logger.error("Error loading system metrics: %s", e)
     finally:
         session.close()
     return results_by_date
