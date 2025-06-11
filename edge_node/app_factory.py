@@ -26,6 +26,10 @@ app.include_router(edge_router, prefix="/edge")
 async def startup_event():
     logger.info("Startup event: initializing monitoring thread...")
     EdgeService.init_process()
+    if not EdgeService.get_completed_previous_round_flag():
+        logger.info("No completed previous flag detected.")
+        EdgeService.execute_fog_notification_about_not_finished_training_round()
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8081)

@@ -12,6 +12,7 @@ RUN apt-get update && apt-get install -y \
     python3-dev \
     iputils-ping \
     dnsutils \
+    iproute2  \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r /app/fog_node/requirements.txt
 

@@ -6,7 +6,7 @@ from shared.fed_node.node_state import NodeState
 from shared.monitoring_thread import MonitoringThread
 from shared.logging_config import logger
 from typing import Callable, Any
-from shared.fed_node.fed_node import ModelScope
+from shared.fed_node.fed_node import MessageScope
 
 
 class CoolingStrategy(Enum):
@@ -103,8 +103,7 @@ class FogCoolingScheduler:
         self.stopping_score += 1
 
     def has_reached_stopping_condition_for_cooler(self) -> bool:
-        if self.stopping_score == sum(1 for node in NodeState.get_current_node().child_nodes if
-                                      not node.is_evaluation_node):
+        if self.stopping_score == len(NodeState.current_node.child_nodes):
             self.stop_cooling()
             self.stopping_score = 0
             return True
@@ -112,7 +111,8 @@ class FogCoolingScheduler:
 
     def is_time_to_send_fog_model_to_cloud(self):
         if self.has_reached_stopping_condition_for_cooler() or not self.is_cooling_operational:
-            self.send_fog_model_to_cloud(ModelScope.TRAINING, None)
+            params = {}
+            self.send_fog_model_to_cloud(MessageScope.TRAINING, params)
             self.monitoring_thread.stop()
 
     def reset(self):

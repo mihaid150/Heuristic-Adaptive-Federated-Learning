@@ -11,5 +11,8 @@ class EdgeResourcesPaths(str, Enum):
     INPUT_DATA_PATH = DATA_FOLDER_PATH + "input_data.csv"
     FILTERED_DATA_PATH = FILTERED_DATA_FOLDER_PATH + "filtered_data.csv"
 
-    CURRENT_DAY_DATA_PATH = FILTERED_DATA_FOLDER_PATH + "current_day_data.csv"
-    NEXT_DAY_DATA_PATH = FILTERED_DATA_FOLDER_PATH + "next_day_data.csv"
+    RETRAINING_DAYS_DATA_PATH = FILTERED_DATA_FOLDER_PATH + "retraining_days_data.csv"
+    EVALUATION_DAYS_DATA_PATH = FILTERED_DATA_FOLDER_PATH + "evaluation_days_data.csv"
+
+    FLAGS_FOLDER_PATH = "/app/flags/"
+    COMPLETED_PREVIOUS_ROUND_JSON_FILE = FLAGS_FOLDER_PATH + "completed_previous_round.json"

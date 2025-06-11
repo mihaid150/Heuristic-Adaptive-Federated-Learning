@@ -56,7 +56,12 @@ def initialize_node(data: Dict[str, Any]) -> Dict[str, Union[str, Dict[str, Unio
     if NodeState.get_current_node() is not None:
         raise HTTPException(status_code=400, detail="Current node is already initialized.")
 
-    node = FedNode(None, data.get("name"), data.get("node_type"), data.get("ip_address"), data.get("port"))
+    if data.get("id") is not None:
+        node_id = data.get("id")
+    else:
+        node_id = None
+
+    node = FedNode(node_id, data.get("name"), data.get("node_type"), data.get("ip_address"), data.get("port"))
     NodeState.initialize_node(node)
 
     logger.info(f"Successfully created a new node with id {node.id}, name {node.name}, type "
@@ -70,6 +75,7 @@ def initialize_node(data: Dict[str, Any]) -> Dict[str, Union[str, Dict[str, Unio
             "type": node.fed_node_type,
             "ip_address": node.ip_address,
             "port": node.port,
+            "device_mac": node.device_mac
         },
     }
 
@@ -88,6 +94,7 @@ def get_node_info() -> Dict[str, Union[str, Dict[str, Union[str, FedNodeType]]]]
             "type": node.fed_node_type,
             "ip_address": node.ip_address,
             "port": node.port,
+            "device_mac": node.device_mac
         },
     }
 
@@ -113,6 +120,7 @@ def set_parent_node(data: Dict[str, Any]) -> Dict[str, Union[str, Dict[str, Unio
             "type": parent_node.fed_node_type,
             "ip_address": parent_node.ip_address,
             "port": parent_node.port,
+            "device_mac": parent_node.device_mac
         },
     }
 
@@ -140,6 +148,7 @@ def get_parent_node() -> Dict[str, Union[str, Dict[str, Union[str, FedNodeType]]
             "type": parent_node.fed_node_type,
             "ip_address": parent_node.ip_address,
             "port": parent_node.port,
+            "device_mac": parent_node.device_mac
         },
     }
 
@@ -181,6 +190,7 @@ def set_child_node(data: Dict[str, Any]) -> Dict[str, Union[str, Dict[str, Union
             "type": child_node.fed_node_type,
             "ip_address": child_node.ip_address,
             "port": child_node.port,
+            "device_mac": child_node.device_mac
         },
     }
 
@@ -210,6 +220,7 @@ def set_children_nodes(data) -> dict[str, str | list[dict[str, str | FedNodeType
             "type": child.fed_node_type,
             "ip_address": child.ip_address,
             "port": child.port,
+            "device_mac": child.device_mac
         }
         for child in child_nodes
     ]
@@ -240,6 +251,7 @@ def get_children_nodes() -> Dict[str, Union[str, List[Dict[str, Union[str, FedNo
             "type": child.fed_node_type,
             "ip_address": child.ip_address,
             "port": child.port,
+            "device_mac": child.device_mac
         }
         for child in current_node.child_nodes
     ]

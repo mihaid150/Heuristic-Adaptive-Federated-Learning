@@ -1,8 +1,9 @@
 import tensorflow as tf
+from shared.utils import required_columns
 from shared.logging_config import logger
 
 
-def create_initial_lstm_model(sequence_length=60, num_features=5):
+def create_initial_lstm_model(sequence_length=144, mask_value=-1):
     """
     Create and compile an enhanced LSTM model for time series forecasting.
 
@@ -14,11 +15,12 @@ def create_initial_lstm_model(sequence_length=60, num_features=5):
 
     Parameters:
         sequence_length (int): The length of the input sequences.
-        num_features (int): The number of features per timestep.
+        mask_value (int): The value to use for masking the input sequences.
 
     Returns:
         tf.keras.Model: A compiled LSTM model.
     """
+    num_features = len(required_columns) - 1
     inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
 
     # Process inputs with Conv1D first (without masking)
@@ -27,7 +29,7 @@ def create_initial_lstm_model(sequence_length=60, num_features=5):
     x = tf.keras.layers.Dropout(0.2)(x)
 
     # Apply Masking after the convolution block.
-    x = tf.keras.layers.Masking(mask_value=0.0)(x)
+    x = tf.keras.layers.Masking(mask_value=mask_value)(x)
 
     # LSTM layers for sequential modeling
     x = tf.keras.layers.LSTM(64, activation='tanh', return_sequences=True)(x)
@@ -46,18 +48,19 @@ def create_initial_lstm_model(sequence_length=60, num_features=5):
     return model
 
 
-def create_attention_lstm_model(sequence_length=60, num_features=5):
+def create_attention_lstm_model(sequence_length=144, mask_value=-1):
     """
     Create and compile an advanced LSTM model for time series forecasting,
     incorporating multi-scale convolutions, bidirectional LSTMs, and an attention mechanism.
 
     Parameters:
         sequence_length (int): The length of the input sequences.
-        num_features (int): The number of features per timestep.
+        mask_value (int): The value to use for masking the input sequences.
 
     Returns:
         tf.keras.Model: A compiled model.
     """
+    num_features = len(required_columns) - 1
     inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
 
     # Multi-scale convolution block: use different kernel sizes
@@ -69,7 +72,7 @@ def create_attention_lstm_model(sequence_length=60, num_features=5):
     x = tf.keras.layers.Dropout(0.2)(x)
 
     # Apply Masking to ignore padded timesteps (if zeros are used for padding)
-    x = tf.keras.layers.Masking(mask_value=0.0)(x)
+    x = tf.keras.layers.Masking(mask_value=mask_value)(x)
 
     # Bidirectional LSTM layers with return_sequences=True for attention
     x = tf.keras.layers.Bidirectional(
@@ -99,7 +102,7 @@ def create_attention_lstm_model(sequence_length=60, num_features=5):
     return model
 
 
-def create_enhanced_attention_lstm_model(sequence_length=60, num_features=5):
+def create_enhanced_attention_lstm_model(sequence_length=144, mask_value=-1):
     """
     Create and compile an enhanced LSTM model for time series forecasting,
     incorporating multi-scale convolutions and a self-attention mechanism while
@@ -116,11 +119,12 @@ def create_enhanced_attention_lstm_model(sequence_length=60, num_features=5):
 
     Parameters:
         sequence_length (int): The length of the input sequences.
-        num_features (int): The number of features per timestep.
+        mask_value (int): The value to use for masking the input sequences.
 
     Returns:
         tf.keras.Model: A compiled LSTM model.
     """
+    num_features = len(required_columns) - 1
     inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
 
     # Multi-scale convolution block: two parallel Conv1D layers with different kernel sizes.
@@ -131,7 +135,7 @@ def create_enhanced_attention_lstm_model(sequence_length=60, num_features=5):
     x = tf.keras.layers.Dropout(0.2)(x)
 
     # Apply Masking layer to ignore padded zeros.
-    x = tf.keras.layers.Masking(mask_value=0.0)(x)
+    x = tf.keras.layers.Masking(mask_value=mask_value)(x)
 
     # First LSTM layer with return_sequences=True.
     lstm_out1 = tf.keras.layers.LSTM(64, activation='tanh', return_sequences=True)(x)
@@ -156,4 +160,3 @@ def create_enhanced_attention_lstm_model(sequence_length=60, num_features=5):
 
     logger.info(f"Created enhanced LSTM model with input shape ({sequence_length}, {num_features})")
     return model
-

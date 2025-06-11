@@ -6,6 +6,7 @@ RUN mkdir "/app/models"
 RUN mkdir "/app/data"
 RUN mkdir "/app/data/filtered_data"
 RUN mkdir "/app/cache"
+RUN mkdir "/app/flags"
 
 COPY edge_node/requirements.txt /app/edge_node/
 
@@ -13,12 +14,14 @@ RUN apt-get update && apt-get install -y \
     build-essential \
     python3-dev \
     iputils-ping \
+    iproute2 \
     dnsutils \
     && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir -r /app/edge_node/requirements.txt
 
 COPY edge_node /app/edge_node
 COPY shared /app/shared
+COPY flags /app/flags
 
 COPY edge_node/data/input_data.csv /app/data/
 
