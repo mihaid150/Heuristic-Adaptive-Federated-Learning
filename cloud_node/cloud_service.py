@@ -422,6 +422,7 @@ class CloudService:
     def get_fog_evaluation_results(message):
         logger.info(f"Processing evaluation result received from fog: fog_id: {message.get('fog_id')}.")
         fog_id = message.get("fog_id")
+        fog_mac = message.get("fog_mac")
         results = message.get("results", [])
         evaluation_date = message.get("evaluation_date")
 
@@ -432,25 +433,29 @@ class CloudService:
             # If the result contains numeric metrics, save that record.
             if "metrics" in res:
                 metrics_records.append({
-                    "edge_id": res.get("edge_id"),
+                    #"edge_id": res.get("edge_id"),
+                    "edge_mac": res.get("edge_mac"),
                     "metrics": res["metrics"],
                     "evaluation_date": evaluation_date
                 })
             # If the result contains prediction pairs, save that record.
             if "prediction_pairs" in res:
                 predictions_records.append({
-                    "edge_id": res.get("edge_id"),
+                   # "edge_id": res.get("edge_id"),
+                    "edge_mac": res.get("edge_mac"),
                     "prediction_pairs": res["prediction_pairs"],
                     "evaluation_date": evaluation_date
                 })
 
         CloudService.received_fog_performance_results_metrics.append({
-            "fog_id": fog_id,
+            #"fog_id": fog_id,
+            "fog_mac": fog_mac,
             "results": metrics_records,
             "evaluation_date": evaluation_date
         })
         CloudService.received_fog_performance_results_predictions.append({
-            "fog_id": fog_id,
+            #"fog_id": fog_id,
+            "fog_mac": fog_mac,
             "results": predictions_records,
             "evaluation_date": evaluation_date
         })
@@ -480,15 +485,16 @@ class CloudService:
             prediction_results = load_prediction_results_from_db()
 
             edge_id = data.get("edge_id")
-            if not edge_id:
-                return {"error": "No edge_id provided for prediction metric."}
+            edge_mac = data.get("edge_mac")
+            if not edge_mac:
+                return {"error": "No edge_mac provided for prediction metric."}
 
-            edge_id_str = str(edge_id)
+            edge_mac_str = str(edge_mac)
             filtered_results = {}
             if isinstance(prediction_results, dict):
                 for eval_date, group in prediction_results.items():
                     for record in group.get("prediction_results", []):
-                        if str(record.get("edge_id")) == edge_id_str:
+                        if str(record.get("edge_mac")) == edge_mac_str:
                             current_date = record.get("evaluation_date", eval_date)
                             filtered_results.setdefault(current_date, []).extend(record.get("prediction_pairs", []))
             else:
@@ -504,13 +510,14 @@ class CloudService:
         # --- Case 2: Genetic Metrics ---
         elif metric_type == 3:
             genetic_results = load_genetic_results_from_db()
-            filter_fog_id = data.get("fog_id")
+            # filter_fog_id = data.get("fog_id")
+            filter_fog_mac = data.get("fog_mac")
             aggregated_genetic = {}
 
             if isinstance(genetic_results, dict):
                 for eval_date, group in genetic_results.items():
                     for record in group.get("genetic_results", []):
-                        if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                        if filter_fog_mac and str(record.get("fog_mac")) != str(filter_fog_mac):
                             continue
                         current_date = record.get("evaluation_date", eval_date)
                         if not current_date:
@@ -523,7 +530,7 @@ class CloudService:
 
             elif isinstance(genetic_results, list):
                 for record in genetic_results:
-                    if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                    if filter_fog_mac and str(record.get("fog_mac")) != str(filter_fog_mac):
                         continue
                     eval_date = record.get("evaluation_date")
                     if not eval_date:
@@ -574,13 +581,14 @@ class CloudService:
         # --- Case 4: System Metric -------
         else:
             system_metrics = load_system_metrics_from_db()
-            filter_fog_id = data.get("fog_id")
+            # filter_fog_id = data.get("fog_id")
+            filter_fog_mac = data.get("fog_mac")
             aggregated_system_metrics = {}
 
             if isinstance(system_metrics, dict):
                 for eval_data, group in system_metrics.items():
                     for record in group.get("system_metrics", []):
-                        if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                        if filter_fog_mac and str(record.get("fog_mac")) != str(filter_fog_mac):
                             continue
                         current_date = record.get("evaluation_date")
                         if not current_date:
@@ -592,7 +600,7 @@ class CloudService:
                                 aggregated_system_metrics[current_date][gen_number] = rec[metric]
             elif isinstance(system_metrics, list):
                 for record in system_metrics:
-                    if filter_fog_id and str(record.get("fog_id")) != str(filter_fog_id):
+                    if filter_fog_mac and str(record.get("fog_mac")) != str(filter_fog_mac):
                         continue
                     eval_date = record.get("evaluation_date")
                     if not eval_date:

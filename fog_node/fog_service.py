@@ -11,6 +11,7 @@ from typing import Dict, Any
 import pika
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
+from shared.fed_node.fed_node import get_mac_address
 from fog_node.fog_resources_paths import FogResourcesPaths
 from fog_node.genetics.genetic_engine import GeneticEngine
 from fog_node.fog_cooling_scheduler import FogCoolingScheduler
@@ -360,9 +361,9 @@ class FogService:
                             logger.info("Stopping queue listener as cooling process is complete.")
                             channel.stop_consuming()
                     elif message.get("scope") == MessageScope.EVALUATION.value:
-                        FogService.edge_evaluation_performances[message.get("edge_id")] = (message.get("metrics"),
-                                                                                           message
-                                                                                           .get("prediction_pairs"))
+                        FogService.edge_evaluation_performances[message.get("edge_mac")] = (message.get("metrics"),
+                                                                                            message
+                                                                                            .get("prediction_pairs"))
 
                         children_number = len(NodeState.get_current_node().child_nodes)
                         if len(FogService.edge_evaluation_performances) == children_number:
@@ -452,6 +453,7 @@ class FogService:
             message = {
                 "scope": model_scope.value,
                 "fog_id": NodeState.get_current_node().id,
+                "fog_mac": get_mac_address(),
                 "lambda_prev": read_lambda_prev(),
                 "model_file": model_file_base64
             }
@@ -459,15 +461,16 @@ class FogService:
             logger.info("Running the sending of edge results to cloud.")
 
             results = []
-            for edge_id, (metrics, prediction_pairs) in FogService.edge_evaluation_performances.items():
+            for edge_mac, (metrics, prediction_pairs) in FogService.edge_evaluation_performances.items():
                 results.append({
-                    "edge_id": edge_id,
+                    "edge_mac": edge_mac,
                     "metrics": metrics,
                     "prediction_pairs": prediction_pairs
                 })
             message = {
                 "scope": model_scope.value,
                 "fog_id": NodeState.get_current_node().id,
+                "fog_mac": get_mac_address(),
                 "results": results,
                 "evaluation_date": params.get("evaluation_date")
             }
@@ -606,6 +609,7 @@ class FogService:
             "header": FogService.genetic_engine.DEFAULT_LOGBOOK_HEADER,
             "records": FogService.genetic_engine.logbook,
             "fog_id": NodeState.get_current_node().id,
+            "fog_mac": get_mac_address(),
             "scope": MessageScope.GENETIC_LOGBOOK.value
         }
 
@@ -638,6 +642,7 @@ class FogService:
     def get_evolution_system_metrics():
         return {
             "fog_id": NodeState.get_current_node().id,
+            "fog_mac": get_mac_address(),
             "system_metrics": FogService.genetic_engine.evolution_system_metrics,
             "scope": MessageScope.EVOLUTION_SYSTEM_METRICS.value
         }

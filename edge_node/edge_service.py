@@ -9,7 +9,7 @@ import threading
 import requests
 from pika.exceptions import AMQPConnectionError
 from shared.fed_node.node_state import NodeState
-from shared.fed_node.fed_node import MessageScope, FedNode, ParentFedNode
+from shared.fed_node.fed_node import MessageScope, FedNode, ParentFedNode, get_mac_address
 from edge_node.edge_resources_paths import EdgeResourcesPaths
 from edge_node.model_manager import pretrain_edge_model, retrain_edge_model, evaluate_edge_model, validate_data_size
 from shared.monitoring_thread import MonitoringThread
@@ -229,6 +229,7 @@ class EdgeService:
             is_training_validation = message.get("is_training_validation")
             response = {
                 "edge_id": NodeState.get_current_node().id,
+                "edge_mac": get_mac_address(),
                 "scope": MessageScope.TEST_DATA_ENOUGH_EXISTS.value,
                 "enough_data_existence": validate_data_size(start_date, current_date, EdgeService.sequence_length,
                                                             is_training_validation)
@@ -275,6 +276,7 @@ class EdgeService:
                         model_file_base64_resp = base64.b64encode(model_bytes).decode("utf-8")
                     response = {
                         "edge_id": NodeState.get_current_node().id,
+                        "edge_mac": get_mac_address(),
                         "metrics": metrics,
                         "system_metrics": system_metrics,
                         "model_file": model_file_base64_resp,
@@ -293,6 +295,7 @@ class EdgeService:
 
                         response = {
                             "edge_id": NodeState.get_current_node().id,
+                            "edge_mac": get_mac_address(),
                             "metrics": metrics,
                             "system_metrics": system_metrics,
                             "prediction_pairs": prediction_pairs,
@@ -326,6 +329,7 @@ class EdgeService:
                                 model_file_base64_resp = base64.b64encode(model_bytes).decode("utf-8")
                             response = {
                                 "edge_id": NodeState.get_current_node().id,
+                                "edge_mac": get_mac_address(),
                                 "metrics": metrics,
                                 "system_metrics": system_metrics,
                                 "model_file": model_file_base64_resp,
@@ -337,6 +341,7 @@ class EdgeService:
                                 model_file_base64_resp = base64.b64encode(model_bytes).decode("utf-8")
                             response = {
                                 "edge_id": NodeState.get_current_node().id,
+                                "edge_mac": get_mac_address(),
                                 "metrics": metrics,
                                 "system_metrics": system_metrics,
                                 "model_file": model_file_base64_resp,

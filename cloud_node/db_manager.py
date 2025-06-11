@@ -36,8 +36,8 @@ class PerformanceRecord(Base):
     __tablename__ = "performance_record"
     id = Column(Integer, primary_key=True, autoincrement=True)
     evaluation_id = Column(Integer, ForeignKey("evaluation.id"), nullable=False)
-    fog_id = Column(String, nullable=False)
-    edge_id = Column(String, nullable=False)
+    fog_mac = Column(String, nullable=False)
+    edge_mac = Column(String, nullable=False)
     mse = Column(Float)
     mae = Column(Float)
     r2 = Column(Float)
@@ -46,16 +46,13 @@ class PerformanceRecord(Base):
     msle = Column(Float)
 
     evaluation = relationship("Evaluation", back_populates="performance_records")
-    __table_args__ = (
-        UniqueConstraint('evaluation_id', 'fog_id', 'edge_id', name='uq_eval_fog_edge'),
-    )
 
 
 class GeneticRecord(Base):
     __tablename__ = "genetic_record"
     id = Column(Integer, primary_key=True, autoincrement=True)
     evaluation_id = Column(Integer, ForeignKey("evaluation.id"), nullable=False)
-    fog_id = Column(String, nullable=True)
+    fog_mac = Column(String, nullable=False)
     generation = Column(Integer, nullable=False)
     nevals = Column(Integer)
     avg = Column(Float)
@@ -66,32 +63,26 @@ class GeneticRecord(Base):
     phenotypic_diversity = Column(Float)
 
     evaluation = relationship("Evaluation", back_populates="genetic_records")
-    __table_args__ = (
-        UniqueConstraint('evaluation_id', 'fog_id', 'generation', name='uq_eval_fog_gen'),
-    )
 
 
 class PredictionRecord(Base):
     __tablename__ = "prediction_record"
     id = Column(Integer, primary_key=True, autoincrement=True)
     evaluation_id = Column(Integer, ForeignKey("evaluation.id"), nullable=False)
-    fog_id = Column(String, nullable=True)  # If needed.
-    edge_id = Column(String, nullable=False)
+    fog_mac = Column(String, nullable=False)
+    edge_mac = Column(String, nullable=False)
     pair_index = Column(Integer, nullable=False)
     real_value = Column(Float)
     predicted_value = Column(Float)
 
     evaluation = relationship("Evaluation", back_populates="prediction_records")
-    __table_args__ = (
-        UniqueConstraint('evaluation_id', 'fog_id', 'edge_id', 'pair_index', name='uq_eval_pred'),
-    )
 
 
 class SystemMetricRecord(Base):
     __tablename__ = "system_metric_record"
     id = Column(Integer, primary_key=True, autoincrement=True)
     evaluation_id = Column(Integer, ForeignKey("evaluation.id"), nullable=False)
-    fog_id = Column(String, nullable=True)
+    fog_mac = Column(String, nullable=False)
     generation = Column(Integer, nullable=False)
     cpu_usage = Column(Float)
     memory_usage = Column(Float)
@@ -193,56 +184,56 @@ def update_node_records_and_relink_ids(nodes: List[Dict[str, Any]]) -> None:
         id_mapping = {}
 
         # Process each node from the payload.
-        for new_node in nodes:
-            new_id = new_node.get("id")
-            label = new_node.get("label")
-            parent_id = new_node.get("parent_id")  # parent's local id as received
-            parent_label = new_node.get("parent_label")
-            mac_address = new_node.get("device_mac")
-
-            # Try to find an existing node record with the same mac.
-            existing_record = session.query(NodeRecord).filter_by(node_label=mac_address).first()
-
-            if existing_record:
-                old_id = existing_record.node_id
-                # Update existing record.
-                existing_record.older_node_id = old_id
-                existing_record.node_id = new_id
-                existing_record.parent_id = parent_id
-                existing_record.parent_label = parent_label
-                existing_record.device_mac = mac_address
-                # Map old id to new id.
-                id_mapping[old_id] = new_id
-            else:
-                # Insert new record if not found.
-                new_record = NodeRecord(
-                    node_id=new_id,
-                    older_node_id="",
-                    node_label=label,
-                    parent_id=parent_id,
-                    parent_label=parent_label,
-                    device_mac=mac_address,
-                )
-                session.add(new_record)
-        session.commit()
-        logger.info("Node records updated successfully.")
-        logger.info(f"ID Mapping: {id_mapping}")
-
-        # Now, update all other tables that reference these node ids.
-        for old_id, new_id in id_mapping.items():
-            session.query(PerformanceRecord).filter(PerformanceRecord.fog_id == old_id).update(
-                {PerformanceRecord.fog_id: new_id}, synchronize_session=False)
-            session.query(PerformanceRecord).filter(PerformanceRecord.edge_id == old_id).update(
-                {PerformanceRecord.edge_id: new_id}, synchronize_session=False)
-            session.query(GeneticRecord).filter(GeneticRecord.fog_id == old_id).update(
-                {GeneticRecord.fog_id: new_id}, synchronize_session=False)
-            session.query(PredictionRecord).filter(PredictionRecord.fog_id == old_id).update(
-                {PredictionRecord.fog_id: new_id}, synchronize_session=False)
-            session.query(PredictionRecord).filter(PredictionRecord.edge_id == old_id).update(
-                {PredictionRecord.edge_id: new_id}, synchronize_session=False)
-            session.query(SystemMetricRecord).filter(SystemMetricRecord.fog_id == old_id).update(
-                {SystemMetricRecord.fog_id: new_id}, synchronize_session=False)
-        session.commit()
+        # for new_node in nodes:
+        #     new_id = new_node.get("id")
+        #     label = new_node.get("label")
+        #     parent_id = new_node.get("parent_id")  # parent's local id as received
+        #     parent_label = new_node.get("parent_label")
+        #     mac_address = new_node.get("device_mac")
+        #
+        #     # Try to find an existing node record with the same mac.
+        #     existing_record = session.query(NodeRecord).filter_by(device_mac=mac_address).first()
+        #
+        #     if existing_record:
+        #         old_id = existing_record.node_id
+        #         # Update existing record.
+        #         existing_record.older_node_id = old_id
+        #         existing_record.node_id = new_id
+        #         existing_record.parent_id = parent_id
+        #         existing_record.parent_label = parent_label
+        #         existing_record.device_mac = mac_address
+        #         # Map old id to new id.
+        #         id_mapping[old_id] = new_id
+        #     else:
+        #         # Insert new record if not found.
+        #         new_record = NodeRecord(
+        #             node_id=new_id,
+        #             older_node_id="",
+        #             node_label=label,
+        #             parent_id=parent_id,
+        #             parent_label=parent_label,
+        #             device_mac=mac_address,
+        #         )
+        #         session.add(new_record)
+        # session.commit()
+        # logger.info("Node records updated successfully.")
+        # logger.info(f"ID Mapping: {id_mapping}")
+        #
+        # # Now, update all other tables that reference these node ids.
+        # for old_id, new_id in id_mapping.items():
+        #     session.query(PerformanceRecord).filter(PerformanceRecord.fog_id == old_id).update(
+        #         {PerformanceRecord.fog_id: new_id}, synchronize_session=False)
+        #     session.query(PerformanceRecord).filter(PerformanceRecord.edge_id == old_id).update(
+        #         {PerformanceRecord.edge_id: new_id}, synchronize_session=False)
+        #     session.query(GeneticRecord).filter(GeneticRecord.fog_id == old_id).update(
+        #         {GeneticRecord.fog_id: new_id}, synchronize_session=False)
+        #     session.query(PredictionRecord).filter(PredictionRecord.fog_id == old_id).update(
+        #         {PredictionRecord.fog_id: new_id}, synchronize_session=False)
+        #     session.query(PredictionRecord).filter(PredictionRecord.edge_id == old_id).update(
+        #         {PredictionRecord.edge_id: new_id}, synchronize_session=False)
+        #     session.query(SystemMetricRecord).filter(SystemMetricRecord.fog_id == old_id).update(
+        #         {SystemMetricRecord.fog_id: new_id}, synchronize_session=False)
+        # session.commit()
         logger.info("Re-linked node ids in related tables successfully.")
 
     except Exception as e:
@@ -272,15 +263,15 @@ def save_performance_results_to_db(current_working_date: str,
             session.flush()  # assign an id
 
         for fog_record in received_fog_performance_results:
-            fog_id = fog_record.get("fog_id")
+            fog_mac = fog_record.get("fog_mac")
             results = fog_record.get("results", [])
             for rec in results:
-                edge_id = rec.get("edge_id")
+                edge_mac = rec.get("edge_mac")
                 metrics = rec.get("metrics", {})
                 record = PerformanceRecord(
                     evaluation_id=evaluation.id,
-                    fog_id=fog_id,
-                    edge_id=edge_id,
+                    fog_mac=fog_mac,
+                    edge_mac=edge_mac,
                     mse=metrics.get("mse"),
                     mae=metrics.get("mae"),
                     r2=metrics.get("r2"),
@@ -321,7 +312,7 @@ def save_genetic_results_to_db(current_working_date: str,
             session.flush()  # assign an id
 
         for record in received_fog_genetic_results:
-            fog_id = record.get("fog_id")  # could be None if not provided
+            fog_mac = record.get("fog_mac")
 
             # First, try to retrieve generation records from the "records" key.
             genetic_data = record.get("records")
@@ -349,7 +340,7 @@ def save_genetic_results_to_db(current_working_date: str,
                 if gen_number is not None and avg_val is not None:
                     genetic = GeneticRecord(
                         evaluation_id=evaluation.id,
-                        fog_id=fog_id,
+                        fog_mac=fog_mac,
                         generation=gen_number,
                         nevals=nevals,
                         avg=avg_val,
@@ -390,17 +381,17 @@ def save_prediction_results_to_db(current_working_date: str,
             session.flush()
 
         for record in received_fog_prediction_results:
-            fog_id = record.get("fog_id")
+            fog_mac = record.get("fog_mac")
             # Assuming record["results"] is a list of prediction records.
             for pred in record.get("results", []):
-                edge_id = pred.get("edge_id")
+                edge_mac = pred.get("edge_mac")
                 pairs = pred.get("prediction_pairs", [])
                 for idx, pair in enumerate(pairs):
                     if isinstance(pair, list) and len(pair) >= 2:
                         prediction = PredictionRecord(
                             evaluation_id=evaluation.id,
-                            fog_id=fog_id,
-                            edge_id=edge_id,
+                            fog_mac=fog_mac,
+                            edge_mac=edge_mac,
                             pair_index=idx,
                             real_value=pair[0],
                             predicted_value=pair[1]
@@ -449,9 +440,9 @@ def load_performance_results_from_db() -> dict[InstrumentedAttribute, dict[str, 
             date = eval_obj.evaluation_date
             records_by_fog = {}
             for record in eval_obj.performance_records:
-                fog_id = record.fog_id
+                fog_mac = record.fog_mac
                 result_entry = {
-                    "edge_id": record.edge_id,
+                    "edge_mac": record.edge_mac,
                     "metrics": {
                         "mse": record.mse,
                         "mae": record.mae,
@@ -462,9 +453,9 @@ def load_performance_results_from_db() -> dict[InstrumentedAttribute, dict[str, 
                     },
                     "evaluation_date": date
                 }
-                if fog_id not in records_by_fog:
-                    records_by_fog[fog_id] = {"fog_id": fog_id, "results": []}
-                records_by_fog[fog_id]["results"].append(result_entry)
+                if fog_mac not in records_by_fog:
+                    records_by_fog[fog_mac] = {"fog_mac": fog_mac, "results": []}
+                records_by_fog[fog_mac]["results"].append(result_entry)
             results_by_date[date] = {"performance_results": list(records_by_fog.values())}
     except Exception as e:
         logger.error("Error loading performance results: %s", e)
@@ -511,7 +502,7 @@ def load_genetic_results_from_db() -> dict:
             date = eval_obj.evaluation_date
             records_by_fog = {}
             for record in eval_obj.genetic_records:
-                fog_id = record.fog_id if record.fog_id is not None else "all"
+                fog_mac = record.fog_mac if record.fog_mac is not None else "all"
                 record_entry = {
                     "gen": record.generation,
                     "nevals": record.nevals,
@@ -522,9 +513,9 @@ def load_genetic_results_from_db() -> dict:
                     "genotypic_diversity": record.genotypic_diversity,
                     "phenotypic_diversity": record.phenotypic_diversity
                 }
-                if fog_id not in records_by_fog:
-                    records_by_fog[fog_id] = {"fog_id": fog_id, "records": []}
-                records_by_fog[fog_id]["records"].append(record_entry)
+                if fog_mac not in records_by_fog:
+                    records_by_fog[fog_mac] = {"fog_mac": fog_mac, "records": []}
+                records_by_fog[fog_mac]["records"].append(record_entry)
             genetic_results = []
             for rec in records_by_fog.values():
                 rec["evaluation_date"] = date
@@ -572,12 +563,12 @@ def load_prediction_results_from_db() -> dict[InstrumentedAttribute, dict[str, l
             records_by_fog = {}
             # Group prediction records by fog_id and edge_id.
             for record in eval_obj.prediction_records:
-                fog_id = record.fog_id if record.fog_id is not None else "all"
-                key = (fog_id, record.edge_id)
+                fog_mac = record.fog_mac if record.fog_mac is not None else "all"
+                key = (fog_mac, record.edge_mac)
                 if key not in records_by_fog:
                     records_by_fog[key] = {
-                        "fog_id": fog_id,
-                        "edge_id": record.edge_id,
+                        "fog_mac": fog_mac,
+                        "edge_mac": record.edge_mac,
                         "prediction_pairs": []
                     }
                 records_by_fog[key]["prediction_pairs"].append([record.real_value, record.predicted_value])
@@ -632,7 +623,7 @@ def save_system_metrics_to_db(current_working_data: str, received_fog_system_met
             session.flush()
 
         for record in received_fog_system_metrics:
-            fog_id = record.get("fog_id")
+            fog_mac = record.get("fog_mac")
             system_metrics = record.get("system_metrics")
 
             for gen_rec in system_metrics:
@@ -647,7 +638,7 @@ def save_system_metrics_to_db(current_working_data: str, received_fog_system_met
                 if gen_number is not None:
                     system_metric_record = SystemMetricRecord(
                         evaluation_id=evaluation.id,
-                        fog_id=fog_id,
+                        fog_mac=fog_mac,
                         generation=gen_number,
                         cpu_usage=cpu_usage,
                         memory_usage=memory_usage,
@@ -675,7 +666,7 @@ def load_system_metrics_from_db() -> dict:
             date = eval_obj.evaluation_date
             records_by_fog = {}
             for record in eval_obj.system_metrics:
-                fog_id = record.fog_id if record.fog_id is not None else "all"
+                fog_mac = record.fog_mac if record.fog_mac is not None else "all"
                 record_entry = {
                     "gen": record.generation,
                     "cpu_usage": record.cpu_usage,
@@ -685,9 +676,9 @@ def load_system_metrics_from_db() -> dict:
                     "average_sensor_temp": record.average_sensor_temp,
                     "resource_load": record.resource_load
                 }
-                if fog_id not in records_by_fog:
-                    records_by_fog[fog_id] = {"fog_id": fog_id, "system_metrics": []}
-                records_by_fog[fog_id]["system_metrics"].append(record_entry)
+                if fog_mac not in records_by_fog:
+                    records_by_fog[fog_mac] = {"fog_mac": fog_mac, "system_metrics": []}
+                records_by_fog[fog_mac]["system_metrics"].append(record_entry)
 
                 system_metric_results = []
                 for rec in records_by_fog.values():
