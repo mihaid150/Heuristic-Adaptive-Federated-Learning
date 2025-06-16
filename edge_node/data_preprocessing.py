@@ -70,6 +70,19 @@ def add_advanced_features(dataframe, windows):
     dataframe['drift_flag'] = (dataframe['value_diff'].abs() > threshold).astype(int)
     return dataframe
 
+def add_time_since_last_spike(dataframe, flag_column='drift_flag'):
+    """Add a feature counting timesteps since the last detected spike."""
+    time_since = []
+    counter = 0
+    for flag in dataframe[flag_column]:
+        if flag == 1:
+            counter = 0
+        else:
+            counter += 1
+        time_since.append(counter)
+    dataframe['time_since_last_spike'] = time_since
+    return dataframe
+
 
 def preprocess_data(data_file_path, timedate_column_name, value_column_name):
     if not os.path.exists(data_file_path) or os.path.getsize(data_file_path) <= 0:
@@ -90,7 +103,8 @@ def preprocess_data(data_file_path, timedate_column_name, value_column_name):
         lambda df: df.dropna(subset=['value']),
         lambda df: df.astype({'value': 'float'}),
         lambda df: add_rolling_features(df, windows=[3, 6, 12, 24]),
-        lambda df: add_advanced_features(df, windows=[3, 6, 12, 24])
+        lambda df: add_advanced_features(df, windows=[3, 6, 12, 24]),
+        add_time_since_last_spike
     ]
 
     for function in functions:

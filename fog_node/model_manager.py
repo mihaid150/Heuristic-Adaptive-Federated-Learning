@@ -109,8 +109,14 @@ def execute_models_aggregation(fog_cooling_scheduler: FogCoolingScheduler, metri
 
     before_training_score = compute_weighted_score(metrics["before_training"])
     after_training_score = compute_weighted_score(metrics["after_training"])
+    spike_intensity = metrics["spike_intensity"]
 
     mu_new = logistic(fog_cooling_scheduler.temperature / fog_cooling_scheduler.initial_temperature, l=1, k=1, x0=0)
+    intensity_factor = np.log1p(spike_intensity)
+    logger.info(f"Spike intensity factor: {intensity_factor:.4f}; before mu_new: {mu_new:.4f}")
+    mu_new *= intensity_factor
+    logger.info(f"Spike intensity factor: {intensity_factor:.4f}; after mu_new: {mu_new:.4f}")
+
     mu_prev = logistic(lambda_prev / fog_cooling_scheduler.initial_temperature, l=1, k=1, x0=0)
 
     recent_performance_factor = 1.0

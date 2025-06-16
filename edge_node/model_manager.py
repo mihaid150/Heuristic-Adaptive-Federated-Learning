@@ -38,15 +38,34 @@ def compute_metrics(y_true, y_pred):
     # msle: ensure no negative values by using log1p
     msle_val = float(np.mean((np.log1p(y_true) - np.log1p(y_pred)) ** 2))
 
+    # MAE on top 10% true values (tail behavior)
+    threshold = np.quantile(y_true, 0.9)
+    mask = y_true >= threshold
+    if np.any(mask):
+        tail_mae_val = float(mean_absolute_error(y_true[mask], y_pred[mask]))
+    else:
+        tail_mae_val = 0.0
+
     return {
         "mse": mse_val,
         "mae": mae_val,
         "r2": r2_val,
         "logcosh": logcosh_val,
         "huber": huber_val,
-        "msle": msle_val
+        "msle": msle_val,
+        "tail_mae": tail_mae_val,
     }
 
+
+def compute_spike_intensity(values: np.ndarray) -> float:
+    """Return a simple measure of spike magnitude using the 90th percentile"""
+    if len(values) == 0:
+        return 0.0
+    threshold = np.quantile(values, 0.9)
+    high_values = values[values >= threshold]
+    if high_values.size == 0:
+        return 0.0
+    return float(np.mean(high_values))
 
 def create_feature_sequences_with_padding(data, sequence_length):
     """
@@ -151,6 +170,7 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
     X = data[feature_columns].values
     y = data["value"].values
     logger.info(f"Features shape: {X.shape}, target length: {len(y)}")
+    spike_intensity = compute_spike_intensity(y)
 
     # Create sequences for features and targets using dedicated functions
     X_seq = create_feature_sequences_with_padding(X, sequence_length=sequence_length)
@@ -198,7 +218,8 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
 
     metrics = {
         "before_training": eval_before,
-        "after_training": eval_after
+        "after_training": eval_after,
+        "spike_intensity": spike_intensity
     }
 
     pretrained_model_file_path = os.path.join(EdgeResourcesPaths.MODELS_FOLDER_PATH,
@@ -250,7 +271,7 @@ def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate
     y_train = train_data["value"].values
     X_eval = eval_data[feature_columns].values
     y_eval = eval_data["value"].values
-
+    spike_intensity = compute_spike_intensity(y_train)
     # Dynamically determine sequence length for training and evaluation data
     train_sequence_length = determine_sequence_length(train_data, target_length=target_sequence_length)
     eval_sequence_length = determine_sequence_length(eval_data, target_length=target_sequence_length)
@@ -298,7 +319,8 @@ def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate
 
     metrics = {
         "before_training": evaluation_before,
-        "after_training": evaluation_after
+        "after_training": evaluation_after,
+        "spike_intensity": spike_intensity
     }
 
     retrained_edge_model_file_path = os.path.join(EdgeResourcesPaths.MODELS_FOLDER_PATH,

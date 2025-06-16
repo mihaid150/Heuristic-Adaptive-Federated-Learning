@@ -6,7 +6,7 @@ from cloud_node.cloud_resources_paths import CloudResourcesPaths
 from shared.shared_resources_paths import SharedResourcesPaths
 from shared.logging_config import logger
 from model_architectures import (create_initial_lstm_model, create_attention_lstm_model,
-                                 create_enhanced_attention_lstm_model)
+                                 create_enhanced_attention_lstm_model, create_moe_lstm_model)
 
 # Suppress TensorFlow low-level logs
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -22,6 +22,8 @@ def create_model(model_type):
         return create_attention_lstm_model()
     elif model_type == "3":
         return create_enhanced_attention_lstm_model()
+    elif model_type == "4":
+        return create_moe_lstm_model()
 
 
 def aggregate_fog_models(received_fog_messages: dict):

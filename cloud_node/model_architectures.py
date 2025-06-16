@@ -1,5 +1,5 @@
 import tensorflow as tf
-from shared.utils import required_columns
+from shared.utils import required_columns, CombineExperts
 from shared.logging_config import logger
 
 
@@ -159,4 +159,43 @@ def create_enhanced_attention_lstm_model(sequence_length=144, mask_value=-1):
     model.compile(optimizer=optimizer, loss='mse', metrics=["mae", "mse"])
 
     logger.info(f"Created enhanced LSTM model with input shape ({sequence_length}, {num_features})")
+    return model
+
+def create_moe_lstm_model(sequence_length=144, mask_value=-1):
+    """Create a mixture-of-experts model with a gating network."""
+    num_features = len(required_columns) - 1
+    inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
+
+    # Shared backbone
+    x = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')(inputs)
+    x = tf.keras.layers.BatchNormalization()(x)
+    x = tf.keras.layers.Masking(mask_value=mask_value)(x)
+    x = tf.keras.layers.LSTM(64, activation='tanh')(x)
+    shared = tf.keras.layers.Dense(32, activation='relu')(x)
+
+    # Expert 1: normal regime
+    normal = tf.keras.layers.Dense(16, activation="relu")(shared)
+    normal = tf.keras.layers.Dense(
+        1, activation="linear", name="normal_head"
+    )(normal)
+
+    # Expert 2: spike regime
+    spike = tf.keras.layers.Dense(16, activation="relu")(shared)
+    spike = tf.keras.layers.Dense(
+        1, activation="linear", name="spike_head"
+    )(spike)
+
+    # Gating network outputs value in [0,1]
+    gate = tf.keras.layers.Dense(16, activation='relu')(shared)
+    gate = tf.keras.layers.Dense(1, activation='sigmoid', name="gate")(gate)
+
+    # Combine experts using the gating value without anonymous lambda
+    outputs = CombineExperts()([normal, spike, gate])
+
+    model = tf.keras.Model(inputs, outputs)
+    model.compile(optimizer=tf.keras.optimizers.Adam(), loss='mse', metrics=["mae", "mse"])
+
+    logger.info(
+        f"Created mixture-of-experts model with input shape ({sequence_length}, {num_features})"
+    )
     return model

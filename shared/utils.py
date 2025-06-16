@@ -4,6 +4,7 @@ import json
 import os
 import aio_pika
 import websockets
+import tensorflow as tf
 from shared.fed_node.fed_node import FedNode
 from shared.logging_config import logger
 
@@ -13,6 +14,7 @@ metric_weights = {
     "huber": 0.10,  # Huber's loss: similar to MSE but less sensitive to outliers
     "msle": 0.05,  # Mean Squared Log Error: useful if you care about relative differences
     "mae": 0.20,  # Mean Absolute Error: often very interpretable, so could be weighted more
+    "tail_mae": 0.10,  # MAE on the highest 10% of true values to emphasize spikes
     "r2": -0.35  # R2: negative weight because a higher R² is better, so subtracting it helps lower the overall
 }
 
@@ -35,7 +37,8 @@ required_columns = [
     'value_rolling_mean_24',
     'value_volatility_24',
     'value_ewm_24',
-    'drift_flag'
+    'drift_flag',
+    'time_since_last_spike'
 ]
 
 
@@ -120,3 +123,19 @@ def reinitialize_and_set_parent(node: FedNode, parent_node):
     asyncio.run(ws_call())
     return
 
+
+@tf.keras.utils.register_keras_serializable()
+class CombineExperts(tf.keras.layers.Layer):
+    """Combine normal and spike predictions using a gating value."""
+
+    def call(self, inputs):
+        normal, spike, gate = inputs
+        return normal * (1 - gate) + spike * gate
+
+    def get_config(self):
+        config = super().get_config()
+        return config
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
