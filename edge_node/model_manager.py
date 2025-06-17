@@ -8,7 +8,8 @@ import numpy as np
 from edge_node.data_selection import filter_data_by_interval_date
 from edge_node.edge_resources_paths import EdgeResourcesPaths
 from edge_node.data_preprocessing import preprocess_data
-from shared.utils import required_columns
+from edge_node.model_wrapper import MoELSTMWithGateLoss
+from shared.utils import required_columns, CombineExperts, select_gate_inputs
 from shared.logging_config import logger
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
@@ -156,65 +157,77 @@ def determine_sequence_length(dataframe, target_length=144):
 
 def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: str, learning_rate: float,
                         batch_size: int, epochs: int, patience: int, fine_tune_layers: int, sequence_length):
-    # Load and filter data
-    filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", start_date, end_date,
-                                 EdgeResourcesPaths.FILTERED_DATA_PATH, print_loggings=False)
+    # Step 1: Load and preprocess data
+    filter_data_by_interval_date(
+        EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", start_date, end_date,
+        EdgeResourcesPaths.FILTERED_DATA_PATH, print_loggings=False
+    )
     preprocess_data(EdgeResourcesPaths.FILTERED_DATA_PATH, "datetime", "apparent power (kWh)")
     data = pd.read_csv(EdgeResourcesPaths.FILTERED_DATA_PATH)
     logger.info(f"Filtered data shape: {data.shape}")
 
+    # Step 2: Prepare feature and target columns
     feature_columns = required_columns.copy()
     feature_columns.remove("value")
-
-    # Extract features and target
     X = data[feature_columns].values
     y = data["value"].values
-    logger.info(f"Features shape: {X.shape}, target length: {len(y)}")
+    drift_flags = data["drift_flag"].values  # needed for gate supervision
     spike_intensity = compute_spike_intensity(y)
 
-    # Create sequences for features and targets using dedicated functions
+    # Step 3: Create sequences
     X_seq = create_feature_sequences_with_padding(X, sequence_length=sequence_length)
     y_seq = create_target_sequences(y, sequence_length=sequence_length)
-    logger.info(f"Created sequences: X_seq shape: {X_seq.shape}, y_seq shape: {y_seq.shape}")
+    drift_seq = create_target_sequences(drift_flags, sequence_length=sequence_length)
 
+    logger.info(f"Created sequences: X_seq shape: {X_seq.shape}, y_seq shape: {y_seq.shape}, drift_seq shape: {drift_seq.shape}")
+
+    # Step 4: Split into training and validation sets
     split_index = int(len(X_seq) * 0.8)
     train_X, val_X = X_seq[:split_index], X_seq[split_index:]
     train_y, val_y = y_seq[:split_index], y_seq[split_index:]
+    spike_labels_train = drift_seq[:split_index]
+    spike_labels_val = drift_seq[split_index:]
+
     logger.info(f"Training set: {train_X.shape}, Validation set: {val_X.shape}")
 
-    custom_objects = {
-        "LogCosh": tf.keras.losses.LogCosh(),
+    # Step 5: Load base MoE model
+    base_model = tf.keras.models.load_model(edge_model_file_path, custom_objects={
+        "CombineExperts": CombineExperts,
         "mse": tf.keras.losses.MeanSquaredError(),
-        "Huber": tf.keras.losses.Huber()
-    }
-    model = tf.keras.models.load_model(edge_model_file_path, custom_objects=custom_objects)
+        "select_gate_inputs": select_gate_inputs
+    })
 
     logger.info("Evaluating the model before training...")
-    predictions_before = model.predict(val_X)
+    predictions_before = base_model.predict(val_X)
     eval_before = compute_metrics(val_y, predictions_before)
 
-    # Fine-tune: freeze all but the last fine_tune_layers
-    for layer in model.layers[:-fine_tune_layers]:
+    # Step 6: Freeze layers if needed
+    for layer in base_model.layers[:-fine_tune_layers]:
         layer.trainable = False
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber())
+    # Step 7: Wrap with gating supervision model
+    alpha = 0.1  # weight for gate loss supervision
+    model = MoELSTMWithGateLoss(base_model, alpha=alpha)
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate))
 
-    logger.info("Training the model...")
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
+    # Step 8: Train the model
+    logger.info("Training the model with gate supervision...")
+    early_stopping = tf.keras.callbacks.EarlyStopping(
+        monitor='val_loss', patience=patience, restore_best_weights=True
+    )
     model.fit(
-        train_X, train_y,
-        validation_data=(val_X, val_y),
+        train_X, (train_y, spike_labels_train),
+        validation_data=(val_X, (val_y, spike_labels_val)),
         batch_size=batch_size,
         epochs=epochs,
         callbacks=[early_stopping],
         verbose=1
     )
 
+    # Step 9: Evaluate after training
     logger.info("Evaluating the model after training...")
-    predictions_after = model.predict(val_X)
+    predictions_after = model.base_model.predict(val_X)  # use base_model for predictions
     eval_after = compute_metrics(val_y, predictions_after)
-    logger.info(f"Evaluation after training: {eval_after}")
 
     metrics = {
         "before_training": eval_before,
@@ -222,32 +235,33 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
         "spike_intensity": spike_intensity
     }
 
-    pretrained_model_file_path = os.path.join(EdgeResourcesPaths.MODELS_FOLDER_PATH,
-                                              EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME)
-    model.save(pretrained_model_file_path)
+    # Step 10: Save the model
+    pretrained_model_file_path = os.path.join(
+        EdgeResourcesPaths.MODELS_FOLDER_PATH,
+        EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME
+    )
+    model.base_model.save(pretrained_model_file_path)
     logger.info(f"Pretrained model saved at: {pretrained_model_file_path}")
+
     return metrics
+
 
 
 def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate: float,
                        batch_size: int, epochs: int, patience: int, fine_tune_layers: int, target_sequence_length=144):
     """
     Retrain the edge model using two days for training and two days for evaluation.
-    'start_date' is the first training day.
-    Training period covers start_date and the next day.
-    Evaluation period covers the two days following the training period.
     """
-    # Define dates for training and evaluation
+    # Define date ranges
     training_day1 = start_date
     training_day2 = (pd.to_datetime(start_date) + pd.Timedelta(days=2)).strftime("%Y-%m-%d")
     evaluation_day1 = (pd.to_datetime(start_date) + pd.Timedelta(days=3)).strftime("%Y-%m-%d")
     evaluation_day2 = (pd.to_datetime(start_date) + pd.Timedelta(days=5)).strftime("%Y-%m-%d")
 
-    # Paths for merged training data and evaluation data
-    training_data_path = EdgeResourcesPaths.RETRAINING_DAYS_DATA_PATH  # new path for merged training data
-    evaluation_data_path = EdgeResourcesPaths.EVALUATION_DAYS_DATA_PATH  # new path for merged evaluation data
+    training_data_path = EdgeResourcesPaths.RETRAINING_DAYS_DATA_PATH
+    evaluation_data_path = EdgeResourcesPaths.EVALUATION_DAYS_DATA_PATH
 
-    # For training, filter data from training_day1 to training_day2 (inclusive)
+    # Prepare training data
     filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
                                  training_day1, training_day2, training_data_path)
     preprocess_data(training_data_path, "datetime", "apparent power (kWh)")
@@ -255,7 +269,7 @@ def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate
     train_data = pd.read_csv(training_data_path)
     logger.info(f"Training data shape (2 days): {train_data.shape}")
 
-    # For evaluation, filter data from evaluation_day1 to evaluation_day2 (inclusive)
+    # Prepare evaluation data
     filter_data_by_interval_date(EdgeResourcesPaths.INPUT_DATA_PATH, "datetime",
                                  evaluation_day1, evaluation_day2, evaluation_data_path)
     preprocess_data(evaluation_data_path, "datetime", "apparent power (kWh)")
@@ -263,72 +277,88 @@ def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate
     eval_data = pd.read_csv(evaluation_data_path)
     logger.info(f"Evaluation data shape (2 days): {eval_data.shape}")
 
+    # Select features and labels
     feature_columns = required_columns.copy()
     feature_columns.remove("value")
-
-    # Extract features and target for training and evaluation
     X_train = train_data[feature_columns].values
     y_train = train_data["value"].values
+    drift_train = train_data["drift_flag"].values
     X_eval = eval_data[feature_columns].values
     y_eval = eval_data["value"].values
+    drift_eval = eval_data["drift_flag"].values
     spike_intensity = compute_spike_intensity(y_train)
-    # Dynamically determine sequence length for training and evaluation data
-    train_sequence_length = determine_sequence_length(train_data, target_length=target_sequence_length)
-    eval_sequence_length = determine_sequence_length(eval_data, target_length=target_sequence_length)
-    logger.info(f"Using training sequence length: {train_sequence_length} and evaluation sequence length: "
-                f"{eval_sequence_length}")
 
-    # Create sequences using the determined sequence lengths.
-    X_train_seq = create_feature_sequences_with_padding(X_train, sequence_length=train_sequence_length)
-    y_train_seq = create_target_sequences(y_train, sequence_length=train_sequence_length)
-    X_eval_seq = create_feature_sequences_with_padding(X_eval, sequence_length=eval_sequence_length)
-    y_eval_seq = create_target_sequences(y_eval, sequence_length=eval_sequence_length)
+    # Determine sequence lengths dynamically
+    train_seq_len = determine_sequence_length(train_data, target_length=target_sequence_length)
+    eval_seq_len = determine_sequence_length(eval_data, target_length=target_sequence_length)
+    logger.info(f"Using training sequence length: {train_seq_len}, evaluation sequence length: {eval_seq_len}")
 
-    logger.info(f"Training sequences: X_train_seq shape: {X_train_seq.shape}, y_train_seq shape: {y_train_seq.shape}")
-    logger.info(f"Evaluation sequences: X_eval_seq shape: {X_eval_seq.shape}, y_eval_seq shape: {y_eval_seq.shape}")
+    # Sequence creation
+    X_train_seq = create_feature_sequences_with_padding(X_train, sequence_length=train_seq_len)
+    y_train_seq = create_target_sequences(y_train, sequence_length=train_seq_len)
+    drift_train_seq = create_target_sequences(drift_train, sequence_length=train_seq_len)
 
-    custom_objects = {
-        "LogCosh": tf.keras.losses.LogCosh(),
+    X_eval_seq = create_feature_sequences_with_padding(X_eval, sequence_length=eval_seq_len)
+    y_eval_seq = create_target_sequences(y_eval, sequence_length=eval_seq_len)
+    drift_eval_seq = create_target_sequences(drift_eval, sequence_length=eval_seq_len)
+
+    logger.info(f"X_train_seq: {X_train_seq.shape}, y_train_seq: {y_train_seq.shape}, drift_train_seq: {drift_train_seq.shape}")
+    logger.info(f"X_eval_seq: {X_eval_seq.shape}, y_eval_seq: {y_eval_seq.shape}, drift_eval_seq: {drift_eval_seq.shape}")
+
+    # Load base model
+    base_model = tf.keras.models.load_model(edge_model_file_path, custom_objects={
+        "CombineExperts": CombineExperts,
         "mse": tf.keras.losses.MeanSquaredError(),
-        "Huber": tf.keras.losses.Huber()
-    }
-    model = tf.keras.models.load_model(edge_model_file_path, custom_objects=custom_objects)
+        "select_gate_inputs": select_gate_inputs,
+    })
 
-    logger.info("Evaluating the model before retraining...")
-    evaluation_before = compute_metrics(y_eval_seq, model.predict(X_eval_seq))
-    logger.info(f"Metrics before retraining: {evaluation_before}")
+    # Evaluation before training
+    logger.info("Evaluating model before retraining...")
+    preds_before = base_model.predict(X_eval_seq)
+    evaluation_before = compute_metrics(y_eval_seq, preds_before)
 
-    for layer in model.layers[:-fine_tune_layers]:
+    # Freeze layers
+    for layer in base_model.layers[:-fine_tune_layers]:
         layer.trainable = False
 
-    optimizer = tf.keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=optimizer, loss=tf.keras.losses.Huber())
-    logger.info("Retraining the model...")
+    # Wrap with gate loss model
+    alpha = 0.1  # supervision weight for gate output
+    model = MoELSTMWithGateLoss(base_model, alpha=alpha)
+    model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate))
+
+    # Train
+    logger.info("Retraining model with gate supervision...")
     early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, restore_best_weights=True)
     model.fit(
-        X_train_seq, y_train_seq,
+        X_train_seq, (y_train_seq, drift_train_seq),
+        validation_data=(X_eval_seq, (y_eval_seq, drift_eval_seq)),
         batch_size=batch_size,
         epochs=epochs,
         callbacks=[early_stopping],
         verbose=1
     )
 
-    logger.info("Evaluating the model after retraining...")
-    evaluation_after = compute_metrics(y_eval_seq, model.predict(X_eval_seq))
-    logger.info(f"Metrics after retraining: {evaluation_after}")
+    # Evaluation after training
+    logger.info("Evaluating model after retraining...")
+    preds_after = model.base_model.predict(X_eval_seq)
+    evaluation_after = compute_metrics(y_eval_seq, preds_after)
 
+    # Save model and return metrics
     metrics = {
         "before_training": evaluation_before,
         "after_training": evaluation_after,
         "spike_intensity": spike_intensity
     }
 
-    retrained_edge_model_file_path = os.path.join(EdgeResourcesPaths.MODELS_FOLDER_PATH,
-                                                  EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME)
-    model.save(retrained_edge_model_file_path)
+    retrained_edge_model_file_path = os.path.join(
+        EdgeResourcesPaths.MODELS_FOLDER_PATH,
+        EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME
+    )
+    model.base_model.save(retrained_edge_model_file_path)
     logger.info(f"Retrained model saved at: {retrained_edge_model_file_path}")
 
     return metrics
+
 
 
 def evaluate_edge_model(edge_model_file_path: str, start_date: str, sequence_length):
@@ -366,7 +396,8 @@ def evaluate_edge_model(edge_model_file_path: str, start_date: str, sequence_len
     custom_objects = {
         "LogCosh": tf.keras.losses.LogCosh(),
         "mse": tf.keras.losses.MeanSquaredError(),
-        "Huber": tf.keras.losses.Huber()
+        "Huber": tf.keras.losses.Huber(),
+        "select_gate_inputs": select_gate_inputs
     }
     model = tf.keras.models.load_model(edge_model_file_path, custom_objects=custom_objects)
 

@@ -1,5 +1,5 @@
 import tensorflow as tf
-from shared.utils import required_columns, CombineExperts
+from shared.utils import required_columns, CombineExperts, select_gate_inputs
 from shared.logging_config import logger
 
 
@@ -167,6 +167,7 @@ def create_moe_lstm_model(sequence_length=144, mask_value=-1):
     inputs = tf.keras.layers.Input(shape=(sequence_length, num_features), dtype=tf.float32)
 
     # Shared backbone
+
     x = tf.keras.layers.Conv1D(filters=32, kernel_size=3, activation='relu', padding='same')(inputs)
     x = tf.keras.layers.BatchNormalization()(x)
     x = tf.keras.layers.Masking(mask_value=mask_value)(x)
@@ -186,8 +187,12 @@ def create_moe_lstm_model(sequence_length=144, mask_value=-1):
     )(spike)
 
     # Gating network outputs value in [0,1]
-    gate = tf.keras.layers.Dense(16, activation='relu')(shared)
-    gate = tf.keras.layers.Dense(1, activation='sigmoid', name="gate")(gate)
+    gate_in = tf.keras.layers.Lambda(select_gate_inputs, name="gate_selector")(inputs)
+    gate_x = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(32, return_sequences=True))(gate_in)
+    gate_x = tf.keras.layers.GlobalMaxPooling1D()(gate_x)
+    gate_x = tf.keras.layers.Dense(64, activation="relu")(gate_x)
+    gate_x = tf.keras.layers.Dropout(0.3)(gate_x)
+    gate = tf.keras.layers.Dense(1, activation="sigmoid", name="gate")(gate_x)
 
     # Combine experts using the gating value without anonymous lambda
     outputs = CombineExperts()([normal, spike, gate])

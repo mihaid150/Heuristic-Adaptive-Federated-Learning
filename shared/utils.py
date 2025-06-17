@@ -41,6 +41,19 @@ required_columns = [
     'time_since_last_spike'
 ]
 
+gate_indices = [
+    2,  # value_volatility_3
+    5,  # value_volatility_6
+    13, # drift_flag
+    14, # time_since_last_spike
+    1,  # value_rolling_mean_3
+    6,  # value_ewm_6
+    9   # value_ewm_12
+]
+
+
+def select_gate_inputs(x):
+    return tf.gather(x, indices=gate_indices, axis=-1)
 
 def delete_all_files_in_folder(folder_path: str, filter_string: str | None) -> None:
     """
