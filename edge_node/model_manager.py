@@ -328,7 +328,7 @@ def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate
 
     # Train
     logger.info("Retraining model with gate supervision...")
-    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='loss', patience=patience, restore_best_weights=True)
+    early_stopping = tf.keras.callbacks.EarlyStopping(monitor='val_loss', patience=patience, restore_best_weights=True)
     model.fit(
         X_train_seq, (y_train_seq, drift_train_seq),
         validation_data=(X_eval_seq, (y_eval_seq, drift_eval_seq)),
