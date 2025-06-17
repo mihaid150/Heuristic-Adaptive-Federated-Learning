@@ -215,6 +215,7 @@ def pretrain_edge_model(edge_model_file_path: str, start_date: str, end_date: st
     early_stopping = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss', patience=patience, restore_best_weights=True
     )
+    logger.info("Going to model fit...")
     model.fit(
         train_X, (train_y, spike_labels_train),
         validation_data=(val_X, (val_y, spike_labels_val)),

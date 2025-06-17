@@ -27,8 +27,13 @@ class MoELSTMWithGateLoss(tf.keras.Model):
         return [self.loss_tracker, self.mse_tracker, self.gate_tracker]
 
     def train_step(self, data):
+        print("train_step received data:", data)
         X, y_true = data  # y_true must be a tuple (regression_target, spike_flag)
+        print("X:", X)
+        print("y_true:", y_true)
         reg_target, spike_flag = y_true
+        print("reg_target:", reg_target)
+        print("spike_flag:", spike_flag)
 
         with tf.GradientTape() as tape:
             output = self.base_model(X, training=True)
