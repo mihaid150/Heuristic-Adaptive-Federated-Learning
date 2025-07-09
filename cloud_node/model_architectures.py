@@ -1,5 +1,5 @@
 import tensorflow as tf
-from shared.utils import required_columns, CombineExperts, select_gate_inputs
+from shared.utils import required_columns, CombineExperts, select_gate_inputs, split_targets
 from shared.logging_config import logger
 
 

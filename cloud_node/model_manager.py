@@ -7,6 +7,7 @@ from shared.shared_resources_paths import SharedResourcesPaths
 from shared.logging_config import logger
 from model_architectures import (create_initial_lstm_model, create_attention_lstm_model,
                                  create_enhanced_attention_lstm_model, create_moe_lstm_model)
+from shared.utils import select_gate_inputs, split_targets
 
 # Suppress TensorFlow low-level logs
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'

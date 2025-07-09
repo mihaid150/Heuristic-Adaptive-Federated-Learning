@@ -9,7 +9,7 @@ from edge_node.data_selection import filter_data_by_interval_date
 from edge_node.edge_resources_paths import EdgeResourcesPaths
 from edge_node.data_preprocessing import preprocess_data
 from edge_node.model_wrapper import MoELSTMWithGateLoss
-from shared.utils import required_columns, CombineExperts, select_gate_inputs
+from shared.utils import required_columns, CombineExperts, select_gate_inputs, split_targets, make_full_batch_filter
 from shared.logging_config import logger
 from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
@@ -154,6 +154,37 @@ def determine_sequence_length(dataframe, target_length=144):
     logger.info(f"Determined sequence length: {chosen_length} (available rows: {available}, target: {target_length})")
     return chosen_length
 
+def build_training_dataset(X, Y, sequence_length, batch_size, buffer_multiplier=10):
+    num_windows = X.shape[0] - sequence_length + 1
+    idx_split   = int(0.8 * num_windows)
+
+    # windows come already batched
+    raw = tf.keras.preprocessing.timeseries_dataset_from_array(
+        data=X,
+        targets=Y,
+        sequence_length=sequence_length,
+        sequence_stride=1,
+        start_index=0,
+        end_index=idx_split + sequence_length - 1,
+        batch_size=batch_size,
+        shuffle=False,
+    )
+
+    ds = (
+        raw
+          # drop that last partial batch (if any)
+          .filter(lambda x, y: tf.shape(x)[0] == batch_size)
+          .map(split_targets)
+          .cache()
+          .shuffle(buffer_size=buffer_multiplier * batch_size)
+          .repeat()
+          .prefetch(tf.data.AUTOTUNE)
+    )
+
+    return ds
+
+
+
 
 def pretrain_edge_model(
         edge_model_file_path: str,
@@ -167,22 +198,26 @@ def pretrain_edge_model(
         sequence_length: int
 ):
     # 1) Filter & preprocess
+    logger.info("Step 1: Filtering data")
     filter_data_by_interval_date(
         EdgeResourcesPaths.INPUT_DATA_PATH, "datetime", start_date, end_date,
         EdgeResourcesPaths.FILTERED_DATA_PATH, print_loggings=False
     )
     preprocess_data(EdgeResourcesPaths.FILTERED_DATA_PATH, "datetime", "apparent power (kWh)")
     data = pd.read_csv(EdgeResourcesPaths.FILTERED_DATA_PATH)
-    logger.info(f"Filtered data shape: {data.shape}")
+    logger.info(f"  → Filtered data shape: {data.shape}")
 
     # 2) Extract arrays
+    logger.info("Step 2: Extracting feature/target arrays")
     feat_cols = [c for c in required_columns if c != 'value']
     X = data[feat_cols].astype('float32').values
     y = data['value'].astype('float32').values
     drift = data['drift_flag'].astype('float32').values
     spike_intensity = float(np.quantile(y, 0.9))
+    logger.info(f"  → X shape: {X.shape}, y length: {y.shape[0]}, drift length: {drift.shape[0]}, spike_intensity: {spike_intensity}")
 
-    # 3) Padding for short series (mask_value=-1)
+    # 3) Padding for short series
+    logger.info("Step 3: Padding if series shorter than sequence_length")
     n = X.shape[0]
     if n < sequence_length:
         pad_len = sequence_length - n
@@ -190,70 +225,131 @@ def pretrain_edge_model(
         X = np.vstack([mask_pad, X])
         y = np.concatenate([np.full((pad_len,), -1, dtype='float32'), y])
         drift = np.concatenate([np.full((pad_len,), -1, dtype='float32'), drift])
-        logger.warning(f"Padded {pad_len} timesteps for sequence_length={sequence_length}.")
+        logger.warning(f"  → Padded {pad_len} timesteps (new X shape: {X.shape})")
+    else:
+        logger.info("  → No padding needed")
 
-    # 4) Build sliding-window dataset lazily
-    ds = tf.keras.preprocessing.timeseries_dataset_from_array(
-        data=X,
-        targets=(y, drift),
+    # 4) Compute split indices
+    num_windows = X.shape[0] - sequence_length + 1
+    logger.info(f"Creating {num_windows} sliding windows (sequence_length={sequence_length})")
+    idx_split = int(0.8 * num_windows)
+    logger.info(f"Step 4: Preparing to build datasets (num_windows={num_windows}, idx_split={idx_split})")
+
+    # 5) Build train/val tf.data datasets
+    logger.info("Step 5: Building train_ds")
+    # before building either dataset
+    Y = np.stack([y, drift], axis=1)
+    train_ds = build_training_dataset(X, Y, sequence_length, batch_size)
+
+    # sanity check
+    for x_batch, y_batch in train_ds.take(1):
+        logger.info(f"Y-Batch sanity check: {y_batch}")
+
+    # 6) Build val_ds
+    raw_val_ds = tf.keras.preprocessing.timeseries_dataset_from_array(
+        data=X, targets=Y,
         sequence_length=sequence_length,
         sequence_stride=1,
+        start_index=idx_split,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
     )
-    total_batches = tf.data.experimental.cardinality(ds).numpy()
-    train_batches = int(0.8 * total_batches)
-    train_ds = ds.take(train_batches).cache().prefetch(tf.data.AUTOTUNE)
-    val_ds = ds.skip(train_batches).cache().prefetch(tf.data.AUTOTUNE)
+    finite_val_ds = (
+        raw_val_ds
+        .filter(make_full_batch_filter(batch_size))
+        .map(split_targets)
+        .cache()
+        .prefetch(tf.data.AUTOTUNE)
+    )
 
-    # 5) Load & evaluate before
+    # build an infinite val_ds for fit()
+    infinite_val_ds = finite_val_ds.repeat()  # now infinite
+
+    # use the same full‐batch filter
+    full_batch_filter = make_full_batch_filter(batch_size)
+    val_ds = (
+        raw_val_ds
+        .filter(full_batch_filter)
+        .map(split_targets)
+        .cache()
+        .prefetch(tf.data.AUTOTUNE)
+        .repeat()  # ← make it infinite!
+    )
+    logger.info("  → val_ds created (now infinite via repeat())")
+    logger.info("  → val_ds created (with split_targets applied)")
+
+    logger.info("  → val_ds created")
+
+    # 6) Load & evaluate before training
+    logger.info("Step 7: Loading base model and evaluating before training")
     base_model = tf.keras.models.load_model(
         edge_model_file_path,
         custom_objects={
             "CombineExperts": CombineExperts,
             "mse": tf.keras.losses.MeanSquaredError(),
-            "select_gate_inputs": select_gate_inputs
+            "select_gate_inputs": select_gate_inputs,
+            "split_targets": split_targets
         }
     )
-    preds_before = base_model.predict(val_ds)
-    y_val = np.concatenate([y_batch for _, (y_batch, _) in val_ds.as_numpy_iterator()])
+    preds_before = base_model.predict(finite_val_ds)
+    logger.info(f"  → preds_before.shape: {preds_before.shape}")
+
+    y_val = np.concatenate([y for x, (y, _) in finite_val_ds], axis=0)
+    logger.info(f"  → y_val.shape: {y_val.shape}")
 
     eval_before = compute_metrics(y_val, preds_before)
+    logger.info(f"  → Metrics before training: {eval_before}")
 
-    # 6) Freeze & wrap
+    # 7) Freeze & wrap
+    logger.info("Step 8: Freezing layers and wrapping with gate-loss model")
     for layer in base_model.layers[:-fine_tune_layers]:
         layer.trainable = False
     model = MoELSTMWithGateLoss(base_model, alpha=0.1)
     model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate))
+    logger.info("  → Model compiled")
 
-    # 7) Train
+    # 8) Train
+    logger.info("Step 9: Training with gate supervision")
     early = tf.keras.callbacks.EarlyStopping(
         monitor='val_loss', patience=patience, restore_best_weights=True
     )
-    model.fit(
+
+    logger.info(f" -> Train_ds element spec: {train_ds.element_spec}")
+
+    train_ds = train_ds.shuffle(10 * batch_size).repeat()
+
+    val_steps = (num_windows - idx_split) // batch_size
+    history = model.fit(
         train_ds,
-        validation_data=val_ds,
+        steps_per_epoch=idx_split // batch_size,
+        validation_data=infinite_val_ds,
+        validation_steps=val_steps,
         epochs=epochs,
         callbacks=[early]
     )
+    logger.info(f"  → Training finished; epochs run: {len(history.history['loss'])}")
 
-    # 8) Evaluate after
-    preds_after = model.base_model.predict(val_ds)
+    # 9) Evaluate after training
+    logger.info("Step 10: Evaluating after training")
+    preds_after = model.base_model.predict(finite_val_ds).flatten()
     eval_after = compute_metrics(y_val, preds_after)
+    logger.info(f"  → Metrics after training: {eval_after}")
 
-    # 9) Save & return
+    # 10) Save & return
+    logger.info("Step 11: Saving retrained model")
     out_path = os.path.join(
         EdgeResourcesPaths.MODELS_FOLDER_PATH,
         EdgeResourcesPaths.RETRAINED_EDGE_MODEL_FILE_NAME
     )
     model.base_model.save(out_path)
-    logger.info(f"Saved pretrained model to {out_path}")
+    logger.info(f"  → Saved to {out_path}")
 
     return {
         "before_training": eval_before,
         "after_training": eval_after,
         "spike_intensity": spike_intensity
     }
+
 
 
 def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate: float,
@@ -319,6 +415,7 @@ def retrain_edge_model(edge_model_file_path: str, start_date: str, learning_rate
         "CombineExperts": CombineExperts,
         "mse": tf.keras.losses.MeanSquaredError(),
         "select_gate_inputs": select_gate_inputs,
+        "split_targets": split_targets
     })
 
     # Evaluation before training
@@ -406,7 +503,8 @@ def evaluate_edge_model(edge_model_file_path: str, start_date: str, sequence_len
         "LogCosh": tf.keras.losses.LogCosh(),
         "mse": tf.keras.losses.MeanSquaredError(),
         "Huber": tf.keras.losses.Huber(),
-        "select_gate_inputs": select_gate_inputs
+        "select_gate_inputs": select_gate_inputs,
+        "split_targets": split_targets
     }
     model = tf.keras.models.load_model(edge_model_file_path, custom_objects=custom_objects)
 

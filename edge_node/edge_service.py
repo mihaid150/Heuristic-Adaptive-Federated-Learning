@@ -15,7 +15,7 @@ from edge_node.model_manager import pretrain_edge_model, retrain_edge_model, eva
 from shared.monitoring_thread import MonitoringThread
 from shared.utils import delete_all_files_in_folder, publish_message
 from shared.logging_config import logger
-from shared.utils import metric_weights
+from shared.utils import metric_weights, select_gate_inputs, split_targets
 from shared.system_metric_collector import SystemMetricCollector
 
 

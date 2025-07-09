@@ -11,7 +11,7 @@ from keras.src.losses import MeanSquaredError
 from shared.logging_config import logger
 from fog_node.fog_resources_paths import FogResourcesPaths
 from fog_node.fog_cooling_scheduler import FogCoolingScheduler
-from shared.utils import metric_weights
+from shared.utils import metric_weights, select_gate_inputs, split_targets
 
 
 def save_lambda_prev(lambda_prev) -> None:

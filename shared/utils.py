@@ -51,10 +51,6 @@ gate_indices = [
     9   # value_ewm_12
 ]
 
-
-def select_gate_inputs(x):
-    return tf.gather(x, indices=gate_indices, axis=-1)
-
 def delete_all_files_in_folder(folder_path: str, filter_string: str | None) -> None:
     """
     Deletes all files in a given folder
@@ -152,3 +148,17 @@ class CombineExperts(tf.keras.layers.Layer):
     @classmethod
     def from_config(cls, config):
         return cls(**config)
+
+@tf.keras.utils.register_keras_serializable()
+def make_full_batch_filter(batch_size):
+    def _is_full_batch(x, y):
+        return tf.equal(tf.shape(x)[0], batch_size)
+    return _is_full_batch
+
+@tf.keras.utils.register_keras_serializable()
+def select_gate_inputs(x):
+    return tf.gather(x, indices=gate_indices, axis=-1)
+
+@tf.keras.utils.register_keras_serializable()
+def split_targets(x, y):
+    return x, (y[:,0], y[:,1])

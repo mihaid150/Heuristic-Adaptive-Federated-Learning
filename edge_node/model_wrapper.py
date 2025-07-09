@@ -1,4 +1,5 @@
 import tensorflow as tf
+from shared.utils import select_gate_inputs, split_targets, make_full_batch_filter
 
 
 class MoELSTMWithGateLoss(tf.keras.Model):
@@ -27,19 +28,15 @@ class MoELSTMWithGateLoss(tf.keras.Model):
         return [self.loss_tracker, self.mse_tracker, self.gate_tracker]
 
     def train_step(self, data):
-        print("train_step received data:", data)
-        X, y_true = data  # y_true must be a tuple (regression_target, spike_flag)
-        print("X:", X)
-        print("y_true:", y_true)
-        reg_target, spike_flag = y_true
-        print("reg_target:", reg_target)
-        print("spike_flag:", spike_flag)
+        X, (reg_target, spike_flag) = data
+        #tf.print(">>> X:", tf.shape(X))
+        #tf.print(">>> y_true:", tf.shape(y_true))
+
 
         with tf.GradientTape() as tape:
             output = self.base_model(X, training=True)
             gate_output = self._gate_model(X, training=True)
 
-            # Compute losses
             mse_loss = self.loss_fn(reg_target, output)
             gate_loss = self.bce(spike_flag, gate_output)
             total_loss = mse_loss + self.alpha * gate_loss
@@ -47,7 +44,6 @@ class MoELSTMWithGateLoss(tf.keras.Model):
         grads = tape.gradient(total_loss, self.base_model.trainable_weights)
         self.optimizer.apply_gradients(zip(grads, self.base_model.trainable_weights))
 
-        # Track metrics
         self.loss_tracker.update_state(total_loss)
         self.mse_tracker.update_state(mse_loss)
         self.gate_tracker.update_state(gate_loss)
@@ -59,8 +55,9 @@ class MoELSTMWithGateLoss(tf.keras.Model):
         }
 
     def test_step(self, data):
-        X, y_true = data
-        reg_target, spike_flag = y_true
+        X, (reg_target, spike_flag) = data
+        #tf.print(">>> X:", tf.shape(X))
+        #tf.print(">>> y_true:", tf.shape(y_true))
 
         output = self.base_model(X, training=False)
         gate_output = self._gate_model(X, training=False)

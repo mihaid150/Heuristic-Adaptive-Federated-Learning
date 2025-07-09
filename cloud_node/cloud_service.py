@@ -16,7 +16,7 @@ from shared.shared_resources_paths import SharedResourcesPaths
 from cloud_node.model_manager import create_model, aggregate_fog_models
 from cloud_node.cloud_resources_paths import CloudResourcesPaths
 from cloud_node.cloud_cooling_scheduler import CloudCoolingScheduler
-from shared.utils import delete_all_files_in_folder
+from shared.utils import delete_all_files_in_folder, select_gate_inputs, split_targets
 from shared.monitoring_thread import MonitoringThread
 from shared.logging_config import logger
 from cloud_node.db_manager import (save_genetic_results_to_db, save_performance_results_to_db,

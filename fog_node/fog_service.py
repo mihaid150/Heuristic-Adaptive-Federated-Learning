@@ -18,7 +18,7 @@ from fog_node.fog_cooling_scheduler import FogCoolingScheduler
 from fog_node.model_manager import execute_models_aggregation, read_lambda_prev
 from shared.monitoring_thread import MonitoringThread
 from shared.shared_resources_paths import SharedResourcesPaths
-from shared.utils import delete_all_files_in_folder
+from shared.utils import delete_all_files_in_folder, select_gate_inputs, split_targets
 from shared.logging_config import logger
 from shared.fed_node.fed_node import MessageScope
 
